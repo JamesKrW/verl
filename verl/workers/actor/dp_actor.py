@@ -171,12 +171,24 @@ class DataParallelPPOActor(BasePPOActor):
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
-
+        
+        # Calculate gradient norm
         if isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
-        self.actor_optimizer.step()
+        
+        
+        grad_norm_threshold = self.config.grad_norm_threshold  
+        
+        # Only update if grad_norm is below threshold
+        if not torch.isfinite(grad_norm) or (grad_norm_threshold is not None and grad_norm >= grad_norm_threshold):
+            # Skip the update
+            print(f"[DEBUG] Skipping optimizer step due to high gradient norm: {grad_norm}")
+            self.actor_optimizer.zero_grad()
+        else:
+            print(f"[DEBUG] Performing optimizer step with gradient norm: {grad_norm}")
+            self.actor_optimizer.step()
         return grad_norm
 
     def compute_log_prob(self, data: DataProto) -> torch.Tensor:

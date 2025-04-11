@@ -172,7 +172,7 @@ def compute_bi_level_gae_advantage_return(
         batch_size, gen_len = token_level_rewards.shape
         advantages = torch.zeros_like(token_level_rewards)
         returns = torch.zeros_like(token_level_rewards)
-        updated_reward = torch.zeros_like(token_level_rewards)
+        updated_reward = token_level_rewards.clone()
         
         for b in range(batch_size):
             # First, calculate high level advantage and return for eos token of each turn using high level gamma
@@ -192,7 +192,7 @@ def compute_bi_level_gae_advantage_return(
                     nextvalue = 0.0
                 
                 # Calculate delta using the next valid token
-                delta = token_level_rewards[b, curr_pos] + high_level_gamma * nextvalue - values[b, curr_pos]
+                delta = updated_reward[b, curr_pos] + high_level_gamma * nextvalue - values[b, curr_pos]
                 
                 # Update advantage estimate
                 lastgaelam = delta + high_level_gamma * lam * lastgaelam
@@ -261,7 +261,6 @@ def compute_turn_wise_gae_advantage_return(
         batch_size, gen_len = token_level_rewards.shape
         advantages = torch.zeros_like(token_level_rewards)
         returns = torch.zeros_like(token_level_rewards)
-        updated_reward = token_level_rewards.clone()
         
         for b in range(batch_size):
             # First, calculate high level advantage and return for eos token of each turn using high level gamma
@@ -289,7 +288,6 @@ def compute_turn_wise_gae_advantage_return(
             
             for i, pos in enumerate(eos_positions):
                 returns[b, pos] = advantages[b, pos] + values[b, pos]
-                updated_reward[b, pos] = advantages[b, pos] + values[b, pos]
             
             # each token in the sequence has the same advantage
             cur_adv = 0.0
