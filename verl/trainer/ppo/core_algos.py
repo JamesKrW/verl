@@ -67,8 +67,9 @@ def get_kl_controller(config):
     return kl_ctrl
 
 
-def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tensor, values: torch.Tensor, 
-                                 loss_mask: torch.Tensor, gamma: float, lam: float):
+def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tensor, values: torch.Tensor,
+                                 step_id: list[int],env_id: list[int],
+                                 next_values: torch.Tensor, loss_mask: torch.Tensor, gamma: float, lam: float):
     """Modified GAE calculation that handle multi-turn with loss mask
     Here we should also ensure that the trajectory score is given at the last valid token instead of last token
     Seems it's true in reward manager
@@ -77,6 +78,10 @@ def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tenso
             shape: (bs, response_length)
         values: `(torch.Tensor)`
             shape: (bs, response_length)
+        step_id: `(list[int])`
+            step id for each sample in batch
+        env_id: `(list[int])`
+            environment id for each sample in batch
         loss_mask: `(torch.Tensor)`
             shape: (bs, response_length). 1 for llm_raw_response, 0 for environment info and paddings
         gamma: `(float)`
@@ -95,15 +100,24 @@ def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tenso
         advantages = torch.zeros_like(token_level_rewards)
         returns = torch.zeros_like(token_level_rewards)
         
+        # 用于存储每个环境最后一个token的GAE值
+        env_gae_dict = {}  # key: (env_id, step_id), value: lastgaelam
+        
         for b in range(batch_size):
-            lastgaelam = 0.0
-            
             # Find the valid token positions (where loss_mask is 1)
             valid_positions = loss_mask[b].nonzero(as_tuple=True)[0]
             
             if len(valid_positions) == 0:
                 continue
                 
+            # 检查是否有下一个step的GAE值
+            curr_env_id = env_id[b]
+            curr_step_id = step_id[b]
+            next_step_gae = env_gae_dict.get((curr_env_id, curr_step_id + 1))
+            
+            # 初始化lastgaelam
+            lastgaelam = next_step_gae if next_step_gae is not None else 0.0
+            
             for i in range(len(valid_positions) - 1, -1, -1):
                 curr_pos = valid_positions[i]
                 
@@ -112,10 +126,9 @@ def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tenso
                     # Next valid position
                     next_pos = valid_positions[i + 1]
                     nextvalue = values[b, next_pos]
-                    
                 else:
                     # Last valid position
-                    nextvalue = 0.0
+                    nextvalue = next_values[b]
                 
                 # Calculate delta using the next valid token
                 delta = token_level_rewards[b, curr_pos] + gamma * nextvalue - values[b, curr_pos]
@@ -123,11 +136,15 @@ def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tenso
                 # Update advantage estimate
                 lastgaelam = delta + gamma * lam * lastgaelam
                 advantages[b, curr_pos] = lastgaelam
+                
+                # 如果是该sample的第一个计算的token（即最后一个有效token）
+                # 将其GAE值存入字典中供下一个step使用
+                if i == len(valid_positions) - 1:
+                    env_gae_dict[(curr_env_id, curr_step_id)] = lastgaelam
             
             # Calculate returns for valid positions
             for i, pos in enumerate(valid_positions):
                 returns[b, pos] = advantages[b, pos] + values[b, pos]
-        
 
         advantages = verl_F.masked_whiten(advantages, loss_mask)
         
