@@ -100,7 +100,7 @@ def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tenso
         advantages = torch.zeros_like(token_level_rewards)
         returns = torch.zeros_like(token_level_rewards)
         
-        # 用于存储每个环境最后一个token的GAE值
+        # to store the last token's GAE value for each environment
         env_gae_dict = {}  # key: (env_id, step_id), value: lastgaelam
         
         for b in range(batch_size):
@@ -110,12 +110,12 @@ def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tenso
             if len(valid_positions) == 0:
                 continue
                 
-            # 检查是否有下一个step的GAE值
+            # check if there's a next step's GAE value
             curr_env_id = env_id[b]
             curr_step_id = step_id[b]
             next_step_gae = env_gae_dict.get((curr_env_id, curr_step_id + 1))
             
-            # 初始化lastgaelam
+            # initialize lastgaelam
             lastgaelam = next_step_gae if next_step_gae is not None else 0.0
             
             for i in range(len(valid_positions) - 1, -1, -1):
@@ -137,8 +137,8 @@ def compute_gae_advantage_return_with_loss_mask(token_level_rewards: torch.Tenso
                 lastgaelam = delta + gamma * lam * lastgaelam
                 advantages[b, curr_pos] = lastgaelam
                 
-                # 如果是该sample的第一个计算的token（即最后一个有效token）
-                # 将其GAE值存入字典中供下一个step使用
+                # if it's the first token of the sample (the last valid token),
+                # store the GAE value for the next step
                 if i == len(valid_positions) - 1:
                     env_gae_dict[(curr_env_id, curr_step_id)] = lastgaelam
             
