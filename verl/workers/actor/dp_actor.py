@@ -32,6 +32,7 @@ from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 import verl.utils.torch_functional as verl_F
 
 from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+from verl.utils.seed import seed_everything
 
 __all__ = ['DataParallelPPOActor']
 
@@ -54,6 +55,8 @@ class DataParallelPPOActor(BasePPOActor):
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
         self.compute_entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
+        seed=self.config.get('seed', 42)
+        seed_everything(seed)
 
     def _forward_micro_batch(self, micro_batch, temperature) -> Tuple[torch.Tensor, torch.Tensor]:
         """

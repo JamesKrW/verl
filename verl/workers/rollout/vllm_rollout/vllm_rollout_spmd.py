@@ -44,7 +44,7 @@ from verl.third_party.vllm import vllm_version
 # 1. support pp in vllm
 # 2. passing tokenizer is not necessary? no encoding/decoding is happending here
 # 3. simplify init logics
-
+from verl.utils.seed import seed_everything
 
 # NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
 def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[int]:
@@ -76,6 +76,8 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
+        seed=self.config.get('seed', 42)
+        seed_everything(seed)
         assert not (not config.enforce_eager and config.free_cache_engine), \
             "disable CUDA graph (enforce_eager = False) if free cache engine"
 

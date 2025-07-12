@@ -32,6 +32,7 @@ from verl.utils.ulysses import ulysses_pad_and_slice_inputs, gather_outpus_and_u
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 
 from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+from verl.utils.seed import seed_everything
 
 __all__ = ['DataParallelPPOCritic']
 
@@ -46,6 +47,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         print(f'Critic use_remove_padding={self.use_remove_padding}')
 
         self.ulysses_sequence_parallel_size = self.config.get('ulysses_sequence_parallel_size', 1)
+        seed=self.config.get('seed', 42)
+        seed_everything(seed)
 
     def _forward_micro_batch(self, micro_batch):
         response_length = micro_batch['responses'].size(-1)
