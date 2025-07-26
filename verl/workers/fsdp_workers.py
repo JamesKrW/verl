@@ -718,7 +718,7 @@ class CriticWorker(Worker):
                                                                             attn_implementation='flash_attention_2',
                                                                             trust_remote_code=trust_remote_code)
             elif "InternVL" in local_path:
-                from verl.models.transformers.modeling_intern_vl_patch import InternVLForTokenClassification
+                from verl.models.transformers.internvl import InternVLForTokenClassification
                 critic_module = InternVLForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch_dtype,
                                                                             config=critic_model_config,
