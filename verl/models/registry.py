@@ -19,7 +19,8 @@ import torch.nn as nn
 
 # Supported models using HF Rmpad
 # TODO(sgm): HF may supported more than listed here, we should add more after testing
-_MODELS_SUPPORT_RMPAD = {'llama', 'mistral', 'gemma', 'qwen2', 'qwen2_vl', 'qwen2_5_vl'}
+# _MODELS_SUPPORT_RMPAD = {'llama', 'mistral', 'gemma', 'qwen2', 'qwen2_vl', 'qwen2_5_vl'}
+_MODELS_SUPPORT_RMPAD = {'llama', 'mistral', 'gemma', 'qwen2', 'qwen2_vl', 'qwen2_5_vl', 'internvl', 'internvl_chat'}
 
 
 def check_model_support_rmpad(model_type: str):

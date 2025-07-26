@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from typing import Dict
 import functools
 import json
@@ -66,6 +67,15 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         return None
 
     default_transformer_cls_names_to_wrap = getattr(module, "_no_split_modules", None)
+
+    # for internvl
+    if re.match("internvl", module.__class__.__name__, re.IGNORECASE):
+        update_cls_names_to_wrap = []
+        for mod in default_transformer_cls_names_to_wrap:
+            if mod != "LlamaDecoderLayer":
+                update_cls_names_to_wrap.append(mod)
+        default_transformer_cls_names_to_wrap = update_cls_names_to_wrap
+
     fsdp_transformer_layer_cls_to_wrap = config.get("transformer_layer_cls_to_wrap",
                                                     default_transformer_cls_names_to_wrap)
     min_num_params = config.get('min_num_params', 0)

@@ -15,6 +15,7 @@
 Single Process Actor
 """
 
+import re
 import itertools
 from typing import Iterable, Tuple
 
@@ -70,6 +71,11 @@ class DataParallelPPOActor(BasePPOActor):
             for key in micro_batch['multi_modal_inputs'][0].keys():
                 multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch['multi_modal_inputs']],
                                                     dim=0)
+                # for internvl
+                if re.match("internvl", self.actor_module.config.model_type):
+                    # The image_flags is used for InternVL's github version
+                    if key == "pixel_values":
+                        image_flags = torch.ones(multi_modal_inputs[key].size(0), dtype=torch.long)
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             input_ids = micro_batch['input_ids']
@@ -114,6 +120,10 @@ class DataParallelPPOActor(BasePPOActor):
                                                                                 self.ulysses_sequence_parallel_size)
 
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
+
+                # for internvl
+                if image_flags is not None:
+                    multi_modal_inputs["image_flags"] = image_flags
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
                 # print(f"[DEBUG] input_ids_rmpad.shape: {input_ids_rmpad.shape}")

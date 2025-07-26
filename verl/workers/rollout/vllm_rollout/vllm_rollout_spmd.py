@@ -96,13 +96,30 @@ class vLLMRollout(BaseRollout):
             vllm_ps.initialize_parallel_state(tensor_model_parallel_size=tensor_parallel_size,
                                               num_tp_per_train_tp=num_tp_per_train_tp)
 
-        assert model_hf_config.max_position_embeddings >= config.prompt_length + config.response_length, \
-            "model context length should be greater than total sequence length"
+        rope_scaling_config = getattr(model_hf_config, "rope_scaling", None)
+        if not rope_scaling_config:
+            max_position_embeddings = None
+            if hasattr(model_hf_config, "max_position_embeddings"):
+                max_position_embeddings = model_hf_config.max_position_embeddings
+            elif hasattr(model_hf_config, "llm_config") and hasattr(
+                model_hf_config.llm_config, "max_position_embeddings"
+            ):
+                max_position_embeddings = model_hf_config.llm_config.max_position_embeddings
+            elif hasattr(model_hf_config, "text_config") and hasattr(
+                model_hf_config.text_config, "max_position_embeddings"
+            ):
+                max_position_embeddings = model_hf_config.text_config.max_position_embeddings
+            if max_position_embeddings is None:
+                raise ValueError("max_position_embeddings not found in model_hf_config")
+
+            assert max_position_embeddings >= config.prompt_length + config.response_length, (
+                "model context length should be greater than total sequence length"
+            )
 
         max_model_len=config.get("max_trajectory_length",config.prompt_length + config.response_length)
         # print(f"[DEBUG] max_trajectory_length: {config.max_trajectory_length}")
         # if model is qwenvl
-        if "Qwen2.5-VL" in model_path:
+        if "Qwen2.5-VL" in model_path or "InternVL" in model_path:
             self.inference_engine = LLM(
                 model=model_path,
                 enable_sleep_mode=True,
