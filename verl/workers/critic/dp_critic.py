@@ -111,7 +111,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 values = output.logits
                 values = values[:, -response_length - 1:-1].squeeze(-1)
             return values
-
+    
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
 
@@ -119,7 +119,14 @@ class DataParallelPPOCritic(BasePPOCritic):
             grad_norm = self.critic_module.clip_grad_norm_(self.config.grad_clip)
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.critic_module.parameters(), max_norm=self.config.grad_clip)
-        self.critic_optimizer.step()
+        grad_norm_threshold = self.config.grad_norm_threshold
+        if not torch.isfinite(grad_norm) or (grad_norm_threshold is not None and grad_norm >= grad_norm_threshold):
+            # Skip the update
+            print(f"[DEBUG] Skipping critic optimizer step due to high gradient norm: {grad_norm}")
+            self.critic_optimizer.zero_grad()
+        else:
+            print(f"[DEBUG] Performing critic optimizer step with gradient norm: {grad_norm}")
+            self.critic_optimizer.step()
         return grad_norm
 
     def compute_values(self, data: DataProto) -> torch.Tensor:
