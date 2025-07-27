@@ -99,6 +99,10 @@ class DataParallelPPOActor(BasePPOActor):
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
+            # for internvl
+            if image_flags is not None:
+                multi_modal_inputs["image_flags"] = image_flags
+
             if self.use_remove_padding:
                 input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1),
                                                            attention_mask)  # input_ids_rmpad (total_nnz, ...)
@@ -126,9 +130,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
 
-                # for internvl
-                if image_flags is not None:
-                    multi_modal_inputs["image_flags"] = image_flags
+                
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
                 # print(f"[DEBUG] input_ids_rmpad.shape: {input_ids_rmpad.shape}")
