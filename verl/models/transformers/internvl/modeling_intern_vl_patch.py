@@ -91,16 +91,8 @@ class InternVLForTokenClassification(PreTrainedModel):
             else:
                 raise NotImplementedError(f'{config.llm_config.architectures[0]} is not implemented.')
 
-        vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.llm_config.hidden_size
-
-        self.mlp1 = nn.Sequential(
-            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio) ** 2),
-            nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio) ** 2, llm_hidden_size),
-            nn.GELU(),
-            nn.Linear(llm_hidden_size, llm_hidden_size)
-        )
-
+         
         # Token classification head
         classifier_dropout = getattr(config, 'classifier_dropout', 
                                    getattr(config.llm_config, 'hidden_dropout_prob', 0.1))
@@ -219,10 +211,12 @@ class InternVLForTokenClassification(PreTrainedModel):
             return_dict=return_dict,
         )
 
-        if return_dict:
-            sequence_output = outputs.last_hidden_state
-        else:
-            sequence_output = outputs[0]
+        # if return_dict:
+        #     # sequence_output = outputs.last_hidden_state
+        #     sequence_output = outputs.hidden_states[-1] if outputs.hidden_states is not None else outputs.logits
+        # else:
+        #     sequence_output = outputs[0]
+        sequence_output = outputs[0]
 
         # Apply dropout and classification head
         sequence_output = self.dropout(sequence_output)

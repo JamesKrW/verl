@@ -71,9 +71,34 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
     # for internvl
     if re.match("internvl", module.__class__.__name__, re.IGNORECASE):
         update_cls_names_to_wrap = []
+        
+        # Check what language model architecture is actually being used
+        llm_arch = None
+        try:
+            if hasattr(module, 'config') and hasattr(module.config, 'llm_config'):
+                if hasattr(module.config.llm_config, 'architectures'):
+                    llm_arch = module.config.llm_config.architectures[0] if module.config.llm_config.architectures else None
+        except Exception:
+            # If we can't determine the architecture, keep all decoder layers to be safe
+            llm_arch = None
+        
         for mod in default_transformer_cls_names_to_wrap:
-            if mod != "LlamaDecoderLayer":
+            # Only exclude decoder layers that definitely don't match the architecture
+            # If architecture is unknown, keep all decoder layers to avoid errors
+            if llm_arch is None:
+                # Keep all layers if we can't determine the architecture
                 update_cls_names_to_wrap.append(mod)
+            elif mod == "LlamaDecoderLayer" and llm_arch != "LlamaForCausalLM":
+                continue  # Skip this layer
+            elif mod == "Qwen2DecoderLayer" and llm_arch != "Qwen2ForCausalLM":
+                continue  # Skip this layer
+            elif mod == "InternLM2DecoderLayer" and llm_arch not in ["InternLM2ForCausalLM"]:
+                continue  # Skip this layer
+            elif mod == "Phi3DecoderLayer" and llm_arch != "Phi3ForCausalLM":
+                continue  # Skip this layer
+            else:
+                update_cls_names_to_wrap.append(mod)
+        
         default_transformer_cls_names_to_wrap = update_cls_names_to_wrap
 
     fsdp_transformer_layer_cls_to_wrap = config.get("transformer_layer_cls_to_wrap",
