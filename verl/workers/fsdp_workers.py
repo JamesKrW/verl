@@ -216,8 +216,7 @@ class ActorRolloutRefWorker(Worker):
             actor_module = actor_module_class.from_pretrained(pretrained_model_name_or_path=local_path,
                                                               torch_dtype=torch_dtype,
                                                               config=actor_model_config,
-                                                              use_flash_attn=False,
-                                                            #   attn_implementation='flash_attention_2',
+                                                              attn_implementation='flash_attention_2',
                                                               trust_remote_code=trust_remote_code)
             
             # for internvl
