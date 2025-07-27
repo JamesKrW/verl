@@ -67,6 +67,7 @@ class DataParallelPPOActor(BasePPOActor):
         """
         response_length = micro_batch['responses'].size(-1)
         multi_modal_inputs = {}
+        image_flags = None
         if 'multi_modal_inputs' in micro_batch:
             for key in micro_batch['multi_modal_inputs'][0].keys():
                 multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch['multi_modal_inputs']],
@@ -79,6 +80,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             input_ids = micro_batch['input_ids']
+            # print("[DEBUG] START input_ids: ", end=" ")
+            # for i in range(input_ids[0].size(0)):
+            #     print(f"[DEBUG] input_ids: {input_ids[0][i]}", end=" ")
+            # print("[DEBUG] END input_ids")
             batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch['attention_mask']
             position_ids = micro_batch['position_ids']

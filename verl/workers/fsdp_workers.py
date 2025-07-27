@@ -207,7 +207,7 @@ class ActorRolloutRefWorker(Worker):
 
 
             # for internvl
-            model_init_kwargs = dict(attn_implementation="flash_attention_2")
+            model_init_kwargs = dict(attn_implementation="flash_attention_2") # may be unused
             if re.match("internvl", actor_model_config.model_type, re.IGNORECASE):
                 if "flash_attention_2" in model_init_kwargs.get("attn_implementation"):
                     model_init_kwargs.pop("attn_implementation")
@@ -216,14 +216,18 @@ class ActorRolloutRefWorker(Worker):
             actor_module = actor_module_class.from_pretrained(pretrained_model_name_or_path=local_path,
                                                               torch_dtype=torch_dtype,
                                                               config=actor_model_config,
-                                                              **model_init_kwargs,
-                                                              # attn_implementation='flash_attention_2',
+                                                              use_flash_attn=False,
+                                                            #   attn_implementation='flash_attention_2',
                                                               trust_remote_code=trust_remote_code)
             
             # for internvl
+            use_orig_params = False
             if re.match("internvl", actor_module.config.model_type):
                 #Frozen the vision parameters for InternVL. We need to find the reason why internvl will occur a bug when using the vision encoder
                 actor_module.img_context_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.context_image_token)
+                for param in actor_module.vision_model.parameters():
+                    param.requires_grad = False
+                use_orig_params = True
 
 
 
@@ -276,7 +280,8 @@ class ActorRolloutRefWorker(Worker):
             actor_module,
             cpu_offload=cpu_offload,
             param_init_fn=init_fn,
-            use_orig_params=False,
+            # use_orig_params=False,
+            use_orig_params=use_orig_params,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
@@ -488,13 +493,22 @@ class ActorRolloutRefWorker(Worker):
 
         # Support all hardwares
         prompts.batch = prompts.batch.to(torch.cuda.current_device())
+        # meta_info = {
+        #     'eos_token_id':
+        #         self.generation_config.eos_token_id
+        #         if self.generation_config is not None else self.tokenizer.eos_token_id,
+        #     'pad_token_id':
+        #         self.generation_config.pad_token_id
+        #         if self.generation_config is not None else self.tokenizer.pad_token_id,
+        # }
+        # for internvl
         meta_info = {
-            'eos_token_id':
-                self.generation_config.eos_token_id
-                if self.generation_config is not None else self.tokenizer.eos_token_id,
-            'pad_token_id':
-                self.generation_config.pad_token_id
-                if self.generation_config is not None else self.tokenizer.pad_token_id,
+            "eos_token_id": self.generation_config.eos_token_id
+            if getattr(self.generation_config, "eos_token_id", None) is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if getattr(self.generation_config, "pad_token_id", None) is not None
+            else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
         with self.rollout_sharding_manager:
