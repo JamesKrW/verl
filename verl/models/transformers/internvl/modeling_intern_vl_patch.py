@@ -17,7 +17,8 @@ from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers import (AutoModel, GenerationConfig, LlamaForCausalLM,
-                          LlamaTokenizer, Qwen2ForCausalLM)
+                          LlamaTokenizer)
+from .modeling_qwen2 import Qwen2ForCausalLM
 from transformers.modeling_outputs import TokenClassifierOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
@@ -216,11 +217,11 @@ class InternVLForTokenClassification(PreTrainedModel):
         #     sequence_output = outputs.hidden_states[-1] if outputs.hidden_states is not None else outputs.logits
         # else:
         #     sequence_output = outputs[0]
-        sequence_output = outputs[0]
+        hidden_states = outputs.hidden_states
 
         # Apply dropout and classification head
-        sequence_output = self.dropout(sequence_output)
-        logits = self.classifier(sequence_output)
+        hidden_states = self.dropout(hidden_states)
+        logits = self.classifier(hidden_states)
 
         loss = None
         if labels is not None:

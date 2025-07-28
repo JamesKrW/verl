@@ -170,7 +170,7 @@ class ActorRolloutRefWorker(Worker):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
 
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
@@ -206,17 +206,9 @@ class ActorRolloutRefWorker(Worker):
                 actor_module_class = AutoModelForCausalLM
 
 
-            # for internvl
-            model_init_kwargs = dict(attn_implementation="flash_attention_2") # may be unused
-            if re.match("internvl", actor_model_config.model_type, re.IGNORECASE):
-                if "flash_attention_2" in model_init_kwargs.get("attn_implementation"):
-                    model_init_kwargs.pop("attn_implementation")
-                    model_init_kwargs["use_flash_attn"] = True
-
             actor_module = actor_module_class.from_pretrained(pretrained_model_name_or_path=local_path,
                                                               torch_dtype=torch_dtype,
                                                               config=actor_model_config,
-                                                              attn_implementation='flash_attention_2',
                                                               trust_remote_code=trust_remote_code)
             
             # for internvl
@@ -705,7 +697,7 @@ class CriticWorker(Worker):
 
         # trust_remote_code = False
         trust_remote_code = config.model.get('trust_remote_code', False)
-        critic_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        critic_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
         critic_model_config.num_labels = 1
 
         use_remove_padding = config.model.get('use_remove_padding', False)
@@ -729,20 +721,17 @@ class CriticWorker(Worker):
                 critic_module = Qwen2_5_VLForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch_dtype,
                                                                             config=critic_model_config,
-                                                                            attn_implementation='flash_attention_2',
                                                                             trust_remote_code=trust_remote_code)
             elif "InternVL" in local_path:
                 from verl.models.transformers.internvl import InternVLForTokenClassification
                 critic_module = InternVLForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch_dtype,
                                                                             config=critic_model_config,
-                                                                            attn_implementation='flash_attention_2',
                                                                             trust_remote_code=trust_remote_code)
             else:
                 critic_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                                 torch_dtype=torch_dtype,
                                                                                 config=critic_model_config,
-                                                                                attn_implementation='flash_attention_2',
                                                                                 trust_remote_code=trust_remote_code)
 
             # some parameters may not in torch_dtype
