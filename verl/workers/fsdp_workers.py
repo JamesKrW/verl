@@ -216,8 +216,8 @@ class ActorRolloutRefWorker(Worker):
             if re.match("internvl", actor_module.config.model_type):
                 #Frozen the vision parameters for InternVL. We need to find the reason why internvl will occur a bug when using the vision encoder
                 actor_module.img_context_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.context_image_token)
-                for param in actor_module.vision_model.parameters():
-                    param.requires_grad = False
+                # for param in actor_module.vision_model.parameters():
+                #     param.requires_grad = False
                 use_orig_params = True
 
 
