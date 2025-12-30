@@ -224,6 +224,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                     response_mask = model_inputs["response_mask"]
                     values = model_inputs["values"]
                     returns = model_inputs["returns"]
+                    value_mask=model_inputs.get("value_mask", response_mask)
+                    response_mask = response_mask * value_mask
 
                     vpreds = self._forward_micro_batch(model_inputs)
                     vf_loss, vf_clipfrac = core_algos.compute_value_loss(

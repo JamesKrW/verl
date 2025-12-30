@@ -285,8 +285,70 @@ def apply_monkey_patch(
         def state_dict(self, *args, **kwargs):
             return torch.nn.Module.state_dict(self, *args, **kwargs)
 
+        def forward_with_vlm_support(
+            self,
+            input_ids=None,
+            past_key_values=None,
+            attention_mask=None,
+            return_past_key_values=False,
+            **kwargs,
+        ):
+            """
+            Patched forward method that handles VLM models where base_model_output.logits might be None.
+            This is necessary for models like Qwen2.5-VL when used as critic in PPO.
+            """
+            kwargs["output_hidden_states"] = True
+            kwargs["past_key_values"] = past_key_values
+
+            if self.is_peft_model and self.pretrained_model.active_peft_config.peft_type == "PREFIX_TUNING":
+                kwargs.pop("past_key_values")
+
+            base_model_output = self.pretrained_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
+
+            last_hidden_state = base_model_output.hidden_states[-1]
+            lm_logits = base_model_output.logits
+            loss = base_model_output.loss
+
+            if last_hidden_state.device != self.v_head.summary.weight.device:
+                last_hidden_state = last_hidden_state.to(self.v_head.summary.weight.device)
+
+            value = self.v_head(last_hidden_state).squeeze(-1)
+
+            # Handle VLM models where logits might be None
+            if lm_logits is None:
+                # For VLM models, try to compute logits from lm_head if available
+                if hasattr(self.pretrained_model, 'lm_head'):
+                    lm_logits = self.pretrained_model.lm_head(last_hidden_state)
+                elif hasattr(self.pretrained_model, 'language_model') and hasattr(self.pretrained_model.language_model, 'lm_head'):
+                    lm_logits = self.pretrained_model.language_model.lm_head(last_hidden_state)
+                else:
+                    # If we still can't get logits, create dummy logits
+                    # This is OK for critic because only value is needed, not logits
+                    vocab_size = self.pretrained_model.config.vocab_size if hasattr(self.pretrained_model.config, 'vocab_size') else \
+                                 self.pretrained_model.config.text_config.vocab_size
+                    lm_logits = torch.zeros(
+                        last_hidden_state.shape[0],
+                        last_hidden_state.shape[1],
+                        vocab_size,
+                        dtype=last_hidden_state.dtype,
+                        device=last_hidden_state.device
+                    )
+
+            # force upcast in fp32 if logits are in half-precision
+            if lm_logits is not None and lm_logits.dtype != torch.float32:
+                lm_logits = lm_logits.float()
+
+            if return_past_key_values:
+                return (lm_logits, loss, value, base_model_output.past_key_values)
+            else:
+                return (lm_logits, loss, value)
         AutoModelForCausalLMWithValueHead.state_dict = state_dict
-        print("Monkey patch state_dict in AutoModelForCausalLMWithValueHead. ")
+        AutoModelForCausalLMWithValueHead.forward = forward_with_vlm_support
+        print("Monkey patch state_dict and forward in AutoModelForCausalLMWithValueHead for VLM support.")
 
     # TODO: VLM models only, unify monkey patch to LLM models.
     if model.config.model_type in ["qwen2_5_vl", "qwen2_vl"]:
