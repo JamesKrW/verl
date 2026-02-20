@@ -649,6 +649,11 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         attn_implementation="flash_attention_2",
         trust_remote_code=trust_remote_code,
     )
+    # VLM configs (e.g. Qwen3-VL) store hidden_size in text_config, not at
+    # the top level. TRL's ValueHead expects config.hidden_size to exist,
+    # so we propagate it upward to avoid UnboundLocalError.
+    if not hasattr(ori_model.config, "hidden_size") and hasattr(ori_model.config, "text_config"):
+        ori_model.config.hidden_size = ori_model.config.text_config.hidden_size
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
     patch_valuehead_model(model)
     return model
