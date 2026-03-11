@@ -379,7 +379,12 @@ class vLLMHttpServerBase:
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-        max_tokens = self.config.max_model_len - len(prompt_ids)
+        max_model_new_tokens = self.config.max_model_len - len(prompt_ids)
+        if "max_new_tokens" in sampling_params and sampling_params["max_new_tokens"] is not None:
+            max_tokens = min(sampling_params.pop("max_new_tokens"), self.config.response_length, max_model_new_tokens)
+        else:
+            sampling_params.pop("max_new_tokens", None)
+            max_tokens = min(self.config.response_length, max_model_new_tokens)
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
