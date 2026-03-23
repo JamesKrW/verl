@@ -32,8 +32,14 @@ def check_model_support_rmpad(model_type: str):
 
     if model_type in ("qwen2_vl", "qwen2_5_vl"):  # patch remove padding for qwen2vl mrope
         from verl.models.transformers.qwen2_vl import ulysses_flash_attn_forward
-        from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLFlashAttention2
-        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLFlashAttention2
+        try:
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLFlashAttention2
+        except ImportError:
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLAttention as Qwen2VLFlashAttention2
+        try:
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLFlashAttention2
+        except ImportError:
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention as Qwen2_5_VLFlashAttention2
 
         Qwen2VLFlashAttention2.forward = ulysses_flash_attn_forward
         Qwen2_5_VLFlashAttention2.forward = ulysses_flash_attn_forward

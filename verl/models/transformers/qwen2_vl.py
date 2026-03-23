@@ -276,7 +276,7 @@ def ulysses_flash_attn_forward(
         dropout=dropout_rate,
         sliding_window=sliding_window,
         is_causal=self.is_causal,
-        use_top_left_mask=self._flash_attn_uses_top_left_mask,
+        use_top_left_mask=getattr(self, '_flash_attn_uses_top_left_mask', False),
         position_ids=position_ids,  # important: pass position ids
     )  # (batch_size, seq_length, num_head / sp_size, head_size)
     if ulysses_sp_size > 1:
@@ -284,4 +284,4 @@ def ulysses_flash_attn_forward(
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
     attn_output = self.o_proj(attn_output)
-    return attn_output, None, None
+    return attn_output, None

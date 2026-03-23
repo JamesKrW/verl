@@ -82,8 +82,44 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             self.inference_engine.wake_up()
             world_size = torch.distributed.get_world_size()
             model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
-            loaded_params = model.load_weights(
-                ((name, param.full_tensor() if world_size != 1 else param) for name, param in params.items()))
+
+            # vLLM 0.8+ load_weights applies hf_to_vllm_mapper internally,
+            # but for VL models it incorrectly maps "model.visual.*" to
+            # "language_model.model.visual.*" instead of "visual.*".
+            # We do the full HF->vLLM key mapping ourselves and bypass the mapper.
+            hf_to_vllm_mapper = getattr(model, 'hf_to_vllm_mapper', None)
+            if hf_to_vllm_mapper is not None:
+                prefix_map = getattr(hf_to_vllm_mapper, 'orig_to_new_prefix', {})
+            else:
+                prefix_map = {}
+
+            def _remap_key(name):
+                # VL models: "model.visual.*" -> "visual.*"
+                if name.startswith("model.visual."):
+                    return name[len("model."):]
+                # New transformers (>=4.50) nests LM weights under
+                # "model.language_model.X" -> vLLM expects "language_model.model.X"
+                if name.startswith("model.language_model."):
+                    rest = name[len("model.language_model."):]
+                    return "language_model.model." + rest
+                # Apply mapper rules (longest prefix first)
+                for orig, new in sorted(prefix_map.items(), key=lambda x: -len(x[0])):
+                    if name.startswith(orig):
+                        return new + name[len(orig):]
+                return name
+
+            # Build remapped weights list, sorted by key so that vLLM's
+            # itertools.groupby in AutoWeightsLoader works correctly.
+            remapped_weights = []
+            for name, param in params.items():
+                tensor = param.full_tensor() if world_size != 1 else param
+                remapped_weights.append((_remap_key(name), tensor))
+            remapped_weights.sort(key=lambda x: x[0])
+
+            # Bypass vLLM's internal mapper since we already remapped
+            from vllm.model_executor.models.utils import AutoWeightsLoader
+            loader = AutoWeightsLoader(model)
+            loaded_params = loader.load_weights(iter(remapped_weights), mapper=None)
             logger.info(f"vLLM load wegiths, loaded_params: {len(loaded_params)}")
 
         log_gpu_memory_usage('After sync model weights in sharding manager', logger=logger)
