@@ -42,7 +42,7 @@ from tensordict import TensorDict
 from verl.workers.utils import losses as losses_mod
 
 BSZ, RESP = 2, 6
-CONFIG = SimpleNamespace(cliprange_value=0.5, loss_agg_mode="token-mean")
+CONFIG = SimpleNamespace(cliprange_value=0.5, loss_agg_mode="token-mean", loss_scale_factor=None)
 
 
 def _data(returns, value_mask=None, response_mask=None) -> TensorDict:
@@ -53,7 +53,16 @@ def _data(returns, value_mask=None, response_mask=None) -> TensorDict:
     }
     if value_mask is not None:
         fields["value_mask"] = value_mask
-    return TensorDict(fields, batch_size=[BSZ])
+    td = TensorDict(fields, batch_size=[BSZ])
+    # verl main normalises the value loss over the global mini-batch and reads these
+    # three off the batch directly (losses.py), rather than through the
+    # get_non_tensor_data default the megatron path uses. dp_size=1 with the other two
+    # unset selects MEAN aggregation, i.e. the local-micro-batch behaviour these tests
+    # were written against -- so they still measure value_mask and not the normalisation.
+    td.set_non_tensor("dp_size", 1)
+    td.set_non_tensor("batch_num_tokens", None)
+    td.set_non_tensor("global_batch_size", None)
+    return td
 
 
 def _loss(returns, value_mask=None, response_mask=None) -> float:
