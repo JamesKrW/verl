@@ -48,6 +48,27 @@ if is_flash_attn_2_available():
     _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
     _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
     _flash_use_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
+elif not is_npu_available:
+    # Neither branch below used to match when flash-attn was absent on a CUDA box, which
+    # left every name in this block undefined -- the module still imported, and the run
+    # died much later at the first attention call with `NameError:
+    # _flash_use_top_left_mask`, naming nothing that suggests a missing package.
+    #
+    # That combination is now normal rather than exotic: flash-attn publishes no wheel
+    # past torch 2.9, so on a newer torch transformers serves flash attention by pulling
+    # kernels-community/flash-attn2 from the Hub. Ask it for the same functions instead of
+    # importing the package. They are introspectable, so the capability probes above still
+    # work as written.
+    from transformers.modeling_flash_attention_utils import (
+        flash_attn_supports_top_left_mask,
+        lazy_import_flash_attention,
+    )
+
+    _fa_fns, _ = lazy_import_flash_attention("flash_attention_2")
+    flash_attn_func, flash_attn_varlen_func = _fa_fns[0], _fa_fns[1]
+    _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
+    _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
+    _flash_use_top_left_mask = flash_attn_supports_top_left_mask()
 
 if is_npu_available:
     from transformers.integrations.npu_flash_attention import npu_flash_attn_func as flash_attn_func
