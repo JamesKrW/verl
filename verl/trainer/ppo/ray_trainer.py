@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import inspect
 import os
 import uuid
 from collections import defaultdict
@@ -257,9 +258,14 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
-        # GDPO: pass raw data for per-dimension reward extraction
-        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
+        # Some estimators need columns beyond the reward/mask pair -- GDPO reads
+        # per-dimension rewards, turn-level estimators group rows by trajectory and turn.
+        # Rather than naming each one here, hand over the raw containers to estimators
+        # that ask for them by declaring the parameter.
+        _adv_params = inspect.signature(adv_estimator_fn).parameters
+        if "non_tensor_batch" in _adv_params or adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
+        if "batch" in _adv_params or adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["batch"] = data.batch
         # Add sum_pi_squared for Optimal Token Baseline
         if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
@@ -284,6 +290,13 @@ def compute_advantage(
 
 @deprecated("Legacy trainer is deprecated, and wil be removed in v0.9.0. Please use `trainer.use_v1=True` instead.")
 class RayPPOTrainer:
+    #: Extra ``non_tensor_batch`` columns to collect per validation sample and hand to
+    #: ``_maybe_log_val_generations``. Empty here: verl logs input/output/score, and what
+    #: else is worth logging is a property of the loop that produced the rows, not of the
+    #: trainer. A subclass names them; ``_validate`` collects whichever are present, so
+    #: wanting one more column does not need a change in this file.
+    val_log_columns: tuple[str, ...] = ()
+
     """Distributed PPO trainer using Ray for scalable reinforcement learning.
 
     This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
@@ -545,8 +558,14 @@ class RayPPOTrainer:
                 dump_path=rollout_data_dir,
             )
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
-        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+    def _maybe_log_val_generations(self, inputs, outputs, scores, extras=None, **kwargs):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)
+
+        ``extras`` carries the columns named in ``val_log_columns`` plus the environment's
+        own per-sample metrics. Ignored here; it exists so a subclass can render its own
+        view -- grouping rows back into episodes, say -- without owning a copy of
+        ``_validate``.
+        """
 
         generations_to_log = self.config.trainer.log_val_generations
 
@@ -604,6 +623,11 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        # Whatever an agent loop published that a logger might want: the frames the
+        # model was looking at, and whichever columns say how rows fit back together.
+        # One row is one model call; an episode can be several, and only the loop knows
+        # which belong together.
+        sample_extras: dict[str, list] = {k: [] for k in self.val_log_columns}
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -669,6 +693,13 @@ class RayPPOTrainer:
             sample_inputs.extend(input_texts)
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
+            for col in self.val_log_columns:
+                vals = test_batch.non_tensor_batch.get(col)
+                sample_extras[col].extend(
+                    [None] * len(output_texts) if vals is None
+                    else (vals.tolist() if hasattr(vals, "tolist") else list(vals))
+                )
+
             # evaluate using reward_function
             reward_tensor, reward_extra_info = extract_reward(test_batch)
 
@@ -690,7 +721,15 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        # reward_extra_infos_dict rides along: it is aligned with the samples and carries
+        # whatever the environment reported per row, traj_success included, which is the
+        # number worth seeing next to a transcript.
+        self._maybe_log_val_generations(
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            scores=sample_scores,
+            extras={**sample_extras, **reward_extra_infos_dict},
+        )
 
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)

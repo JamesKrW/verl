@@ -229,7 +229,23 @@ def hf_processor(name_or_path, **kwargs):
                 # per-image-token check (which Qwen's processor lacks).
                 processor.validate_inputs = lambda *args, **kwargs: None
             case _:
-                raise ValueError(f"Unsupported processor type: {processor.__class__.__name__}")
+                # Two different models reach here and only one of them is a problem.
+                # A non-mrope VLM -- LLaVA, InternVL, Pixtral -- wants ordinary position
+                # ids and is served correctly by having no get_rope_index at all.
+                # Upstream raised for both, which is caught below and turns the processor
+                # into None: the run then reads as text-only, and the pictures are dropped
+                # somewhere far from here.
+                #
+                # An mrope model missing from the match above is the real hazard, and
+                # this cannot tell the two apart -- so it warns rather than either
+                # raising on the families that are fine or staying silent about the one
+                # that is not. `_compute_position_ids` checks for the attribute.
+                warnings.warn(
+                    f"{processor.__class__.__name__} has no known get_rope_index; assuming ordinary "
+                    "position ids. Correct for a non-mrope VLM (LLaVA, InternVL, Pixtral); wrong, "
+                    "and silently so, if this model uses mrope -- add it to the match above.",
+                    stacklevel=1,
+                )
 
         if model_class is not None:
             processor.get_rope_index = types.MethodType(model_class.get_rope_index, processor)

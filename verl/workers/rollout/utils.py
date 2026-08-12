@@ -90,28 +90,52 @@ async def ensure_async_iterator(iterable):
             yield item
 
 
-def qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
-    """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the
-    <|image_pad|> and <|video_pad|> token by image_data.
-    For example,
-    ```
-    <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
-    =>
-    <|vision_start|><|image_pad|><|vision_end|>
-    ```
+def dedup_multimodal_placeholder_tokens(prompt_ids: list[int], processor):
+    """Collapse each run of repeated image/video placeholders down to a single token.
+
+    Sending ``prompt_ids`` alongside ``multi_modal_data`` requires one placeholder per
+    item, because vLLM expands it itself from the images it is given. A prompt
+    tokenized by the HF processor already carries the expanded run, so passing it
+    through unchanged makes vLLM expand a second time::
+
+        <|vision_start|><|image_pad|><|image_pad|>...<|image_pad|><|vision_end|>
+        =>
+        <|vision_start|><|image_pad|><|vision_end|>
+
+    The mismatch does not raise: it surfaces as a CUDA ``masked_scatter`` assert inside
+    the model, with nothing naming the prompt.
+
+    Keyed on the placeholder ids the processor declares rather than on its class name,
+    so it holds wherever one image expands to one *contiguous* run -- Qwen2-VL,
+    Qwen2.5-VL and InternVL among them.
+
+    It does not hold everywhere, and the failure is silent either way. Pixtral separates
+    rows with ``[IMG_BREAK]``, so the run is interrupted and one image is left with one
+    placeholder per row. Llama-4 declares ``image_token_id`` for ``<|image|>``, a single
+    non-repeated marker, while the repeated placeholder is ``<|patch|>`` -- so this is a
+    no-op and the doubly-expanded prompt reaches the engine, which is the thing the
+    function exists to prevent. Either family needs its own rule.
     """
-    if (
-        processor is not None
-        and hasattr(processor, "image_processor")
-        and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__
-    ):
-        prompt_ids = np.array(prompt_ids)
-        mask = np.ones(len(prompt_ids), dtype=bool)
-        is_value = (prompt_ids == processor.image_token_id) | (prompt_ids == processor.video_token_id)
-        mask[1:] &= ~(is_value[1:] & is_value[:-1])
-        return prompt_ids[mask].tolist()
-    else:
+    if processor is None:
         return prompt_ids
+
+    placeholder_ids = [
+        getattr(processor, attr, None) for attr in ("image_token_id", "video_token_id", "audio_token_id")
+    ]
+    placeholder_ids = [tid for tid in placeholder_ids if isinstance(tid, int)]
+    if not placeholder_ids:
+        return prompt_ids
+
+    prompt_ids = np.asarray(prompt_ids)
+    is_placeholder = np.isin(prompt_ids, placeholder_ids)
+    keep = np.ones(len(prompt_ids), dtype=bool)
+    keep[1:] &= ~(is_placeholder[1:] & is_placeholder[:-1])
+    return prompt_ids[keep].tolist()
+
+
+# Kept so existing call sites and forks keep working; the behaviour is no longer
+# Qwen-specific.
+qwen2_5_vl_dedup_image_tokens = dedup_multimodal_placeholder_tokens
 
 
 def get_vision_placeholder_token_ids(processor) -> list[int]:

@@ -78,6 +78,60 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
+def cap_token_ids(
+    token_ids: list[int],
+    budget: int,
+    *,
+    multimodal: bool,
+    keep: str = "tail",
+    what: str = "prompt",
+    budget_name: str = "budget",
+    on_overflow: str = "truncate",
+    hint: str = "",
+) -> list[int]:
+    """Cap a token sequence, refusing to slice one that carries multimodal placeholders.
+
+    Placeholder tokens stand 1:1 for the features in ``multi_modal_inputs``. Slicing a
+    sequence that contains them breaks that correspondence, and nothing downstream
+    notices: position ids are rebuilt from the feature grid, so the model is handed a
+    sequence and a position tensor of different lengths and dies inside the attention
+    with a shape error naming neither the prompt nor the image. Raising here is the
+    difference between a configuration error and an afternoon.
+
+    ``keep`` is ``"tail"`` for prompts, which drop their oldest context, and ``"head"``
+    for responses, which are cut off at the end.
+
+    ``on_overflow="raise"`` refuses to truncate text as well. Trimming a dataset prompt to
+    fit is ordinary, which is why it stays the default; trimming an *episode* is not. Both
+    directions destroy something the run depends on -- a tail cut drops the system prompt
+    and the model trains on a sequence with no instructions, a head cut drops the closing
+    turns along with the rewards earned there, and the spans indexing them are clipped
+    away with it. Neither raises where it happens, and the loss stays finite either way.
+    """
+    if len(token_ids) <= budget:
+        return token_ids
+    if multimodal:
+        raise ValueError(
+            f"Multimodal {what} produced {len(token_ids)} tokens, exceeding "
+            f"{budget_name}={budget}. Truncating multimodal token sequences corrupts "
+            f"vision/audio feature alignment, so this is treated as a configuration "
+            f"error. Reduce the multimodal input size (e.g. ``total_pixels`` / "
+            f"``max_pixels`` / fps / number of frames), shorten the episode, or "
+            f"increase ``{budget_name}``."
+        )
+    if on_overflow == "raise":
+        lost = "oldest context, including the system prompt" if keep == "tail" else "closing turns and their rewards"
+        raise ValueError(
+            f"{what.capitalize()} of {len(token_ids)} tokens exceeds {budget_name}={budget}. "
+            f"Truncating would silently drop the {lost}, so this is treated as a "
+            f"configuration error rather than trained on.{hint}"
+        )
+    logger.warning(
+        "%s of %d tokens exceeds %s=%d; truncating.", what.capitalize(), len(token_ids), budget_name, budget
+    )
+    return token_ids[-budget:] if keep == "tail" else token_ids[:budget]
+
+
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
 
@@ -444,22 +498,18 @@ class AgentLoopBase(ABC):
         # Mirror the response-side ``response_ids[:response_length]`` cap on the prompt side:
         # every prompt produced by the agent loop must fit in ``rollout.prompt_length`` so that
         # ``_pad_token_ids`` (and downstream ``torch.cat``) can rely on uniform shapes.
-        # Multimodal prompts cannot be sliced here because placeholder tokens must remain
-        # aligned 1:1 with ``multi_modal_inputs`` features, so we fail loudly instead.
-        prompt_length = self.rollout_config.prompt_length
-        if len(prompt_ids) > prompt_length:
-            if images or videos or audios:
-                raise ValueError(
-                    f"Multimodal prompt produced {len(prompt_ids)} tokens, exceeding "
-                    f"rollout.prompt_length={prompt_length}. Truncating multimodal token "
-                    f"sequences corrupts vision/audio feature alignment, so this is treated "
-                    f"as a configuration error. Reduce the multimodal input size "
-                    f"(e.g. ``total_pixels`` / ``max_pixels`` / fps / number of frames) or "
-                    f"increase ``rollout.prompt_length``."
-                )
-            prompt_ids = self._cap_text_prompt_length(prompt_ids)
-
-        return prompt_ids
+        # `cap_token_ids`, not the inline version upstream grew here: the two are
+        # equivalent for a prompt -- raise on multimodal, left-truncate text -- but the
+        # helper also serves the response side with keep="head", and having one rule is
+        # what keeps the prompt and response caps from drifting apart again.
+        return cap_token_ids(
+            prompt_ids,
+            self.rollout_config.prompt_length,
+            multimodal=bool(images or videos or audios),
+            keep="tail",
+            what="prompt",
+            budget_name="rollout.prompt_length",
+        )
 
     @abstractmethod
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
@@ -923,6 +973,12 @@ class AgentLoopWorker:
         if self.processor is None or not hasattr(self.processor, "get_rope_index"):
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
+        # Only mrope models get a get_rope_index binding (see utils/tokenizer.py). Other
+        # VLMs -- InternVL, LLaVA and friends -- index positions the ordinary way, so
+        # they take the same path as a text-only model rather than crashing here.
+        if not hasattr(self.processor, "get_rope_index"):
+            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
+
         multi_modal_kwargs = {
             "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
             "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
@@ -1089,6 +1145,22 @@ class AgentLoopWorker:
             response_length = attention_mask[:, prompt_length:].sum(dim=1) - 1
             rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
             rm_scores[torch.arange(response_mask.size(0)), response_length] = torch.tensor(scores, dtype=torch.float32)
+
+            # An agent loop that scored individual spans of a response can publish the
+            # whole vector instead of a single number. Without this the vector is summed
+            # to a scalar and written at the last token, which erases which part of the
+            # response earned what -- and with it any credit assignment finer than the
+            # turn. Rows that publish nothing keep the scalar placement above.
+            for b, item in enumerate(inputs):
+                vector = (getattr(item, "extra_fields", None) or {}).get("per_token_reward")
+                if not vector:
+                    continue
+                width = min(len(vector), rm_scores.size(1))
+                # Clear the row first. The scalar above was placed at the last real
+                # position; a vector shorter than that would leave it in place and the
+                # row's reward would be counted twice.
+                rm_scores[b].zero_()
+                rm_scores[b, :width] = torch.tensor(vector[:width], dtype=torch.float32)
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {

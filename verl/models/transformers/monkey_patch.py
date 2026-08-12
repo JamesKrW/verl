@@ -288,6 +288,59 @@ def patch_forward_with_backends(
         raise ValueError(f"Unsupported fused_kernels_backend: {fused_kernels_backend}. Choose 'triton' or 'torch'.")
 
 
+def valuehead_forward_value_only(
+    self,
+    input_ids=None,
+    past_key_values=None,
+    attention_mask=None,
+    return_past_key_values=False,
+    **kwargs,
+):
+    """VLM-tolerant replacement for ``trl.AutoModelForCausalLMWithValueHead.forward``.
+
+    Installed by :func:`apply_monkey_patch`. Two deviations from trl's own
+    implementation, both required for VLM critics (Qwen2.5-VL / Qwen3-VL):
+
+    1. trl unconditionally evaluates ``base_model_output.logits.float()``. Several
+       VLM heads return ``logits=None``, which raises ``AttributeError``.
+    2. verl's value-head path only ever reads ``output[2]`` -- see
+       ``FSDPEngineWithValueHead.prepare_model_outputs``, its sole consumer. So we
+       skip logits entirely rather than materialising and upcasting a
+       ``(bsz, seqlen, vocab_size)`` tensor that is immediately discarded: for
+       Qwen2.5-VL (vocab 152k) at seqlen 8k that is ~2.4 GB per micro-batch in bf16,
+       plus ~4.8 GB more once trl upcasts it to fp32.
+
+    Returns ``(None, loss, value)`` -- trl's tuple arity is preserved so callers that
+    index ``output[2]`` are unaffected.
+    """
+    kwargs["output_hidden_states"] = True
+    kwargs["past_key_values"] = past_key_values
+    # The hidden states are read off the output below, so the dict form is required
+    # either way -- and verl's fused-kernel forwards refuse to run without it. Most
+    # models default to True, which is why only some families surfaced this.
+    kwargs["return_dict"] = True
+
+    if self.is_peft_model and self.pretrained_model.active_peft_config.peft_type == "PREFIX_TUNING":
+        kwargs.pop("past_key_values")
+
+    base_model_output = self.pretrained_model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        **kwargs,
+    )
+
+    last_hidden_state = base_model_output.hidden_states[-1]
+    if last_hidden_state.device != self.v_head.summary.weight.device:
+        last_hidden_state = last_hidden_state.to(self.v_head.summary.weight.device)
+    value = self.v_head(last_hidden_state).squeeze(-1)
+
+    lm_logits = None  # unused by verl's critic path; see docstring
+    loss = base_model_output.loss
+    if return_past_key_values:
+        return (lm_logits, loss, value, base_model_output.past_key_values)
+    return (lm_logits, loss, value)
+
+
 def apply_monkey_patch(
     model: PreTrainedModel,
     ulysses_sp_size: int = 1,
@@ -356,7 +409,8 @@ def apply_monkey_patch(
             return torch.nn.Module.state_dict(self, *args, **kwargs)
 
         AutoModelForCausalLMWithValueHead.state_dict = state_dict
-        print("Monkey patch state_dict in AutoModelForCausalLMWithValueHead. ")
+        AutoModelForCausalLMWithValueHead.forward = valuehead_forward_value_only
+        print("Monkey patch state_dict and forward in AutoModelForCausalLMWithValueHead (VLM critic support).")
 
     # TODO: VLM models only, unify monkey patch to LLM models.
     if model.config.model_type in ["qwen2_5_vl", "qwen2_vl"]:
