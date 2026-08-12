@@ -149,16 +149,19 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             critic_cfg = omega_conf_to_dataclass(self.config.critic)
 
             # convert critic_cfg into TrainingWorkerConfig for the unified model engine worker
-            from verl.workers.config import FSDPEngineConfig
+            from verl.workers.config import EngineConfig
             from verl.workers.engine_workers import TrainingWorkerConfig
 
             self.orig_critic_cfg = critic_cfg
-            if self.orig_critic_cfg.strategy == "fsdp":
-                engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
-                engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
-                engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
-            else:
-                raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
+            # Read `engine` / `model`, matching RayPPOTrainer. The engine refactor moved
+            # the engine config out from under `model`, so `critic.model` is an
+            # HFModelConfig with no `fsdp_config`, and `model_config` no longer exists
+            # on the critic dataclass at all. Reading the pre-refactor names raised
+            # AttributeError for any run with a critic; nothing overrides this method,
+            # so the whole separated lineage could only run critic-free algorithms.
+            engine_config: EngineConfig = self.orig_critic_cfg.engine
+            engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+            engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
 
             # Wire the critic profiler config via the hydra path (real dataclass tool_config), so the
             # standalone critic TrainingWorker gets a working DistProfiler instead of a silent no-op.
@@ -406,6 +409,136 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
         return batch
 
+    #: Optional column an agent-loop manager may stamp on each generated row, giving the
+    #: index of the input rollout it came from. Its presence is what tells this trainer
+    #: that one rollout may have produced several rows.
+    ROLLOUT_SOURCE_COLUMN = "__vagen_rollout_index__"
+
+    def _align_generated_rows(self, combined_gen_output: DataProto, num_sampled_prompts: int):
+        """Line the generated rows up with the batch that produced them.
+
+        Returns ``(gen_batch_output, batch_row_index)``. ``batch_row_index`` is ``None``
+        in the ordinary one-row-per-rollout case, and the caller then behaves exactly as
+        it did before this method existed.
+
+        ★ Why this is not just ``slice(0, num_sampled_prompts)``. A multi-turn agent loop
+        may return several training rows per rollout -- one per turn, or one per
+        conversation once the context is compacted. Truncating to the *input* row count
+        silently discards every row past the first few rollouts: measured on real runs at
+        8 of ~155 rows kept under one-row-per-turn, and 8 of ~40 under compaction. Nothing
+        downstream notices, because every shape is self-consistent afterwards and the
+        surviving rows look exactly like an ordinary single-turn batch.
+
+        A rollout that produced no rows at all (an unusable episode) falls out of the same
+        mechanism: its index never appears, so it is dropped from ``batch`` too rather
+        than shifting every later row onto the wrong prompt. That case used to abort the
+        step with a bare size assertion from ``union``.
+        """
+        source = combined_gen_output.non_tensor_batch.get(self.ROLLOUT_SOURCE_COLUMN)
+        is_remax = self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX
+
+        if source is None:
+            # No manager claimed multi-row output. Keep the historical behaviour, but
+            # refuse the silent truncation that used to hide here.
+            if not is_remax and len(combined_gen_output) != num_sampled_prompts:
+                raise ValueError(
+                    f"rollout returned {len(combined_gen_output)} rows for {num_sampled_prompts} "
+                    f"prompts. An agent loop that emits several rows per rollout must stamp "
+                    f"'{self.ROLLOUT_SOURCE_COLUMN}' on each row so they can be aligned; "
+                    f"otherwise the extra rows would be dropped without a word."
+                )
+            return combined_gen_output.slice(0, num_sampled_prompts), None
+
+        if is_remax:
+            raise ValueError(
+                "REMAX splits the generated batch positionally into a sampled and a greedy "
+                "half, which a multi-row agent loop invalidates. Use a different advantage "
+                "estimator, or an agent loop that emits one row per rollout."
+            )
+
+        index = np.asarray(source, dtype=np.int64)
+        if index.size and (index.min() < 0 or index.max() >= num_sampled_prompts):
+            raise ValueError(
+                f"{self.ROLLOUT_SOURCE_COLUMN} ranges over [{index.min()}, {index.max()}] but "
+                f"only {num_sampled_prompts} rollouts were dispatched"
+            )
+        if np.any(np.diff(index) < 0):
+            raise ValueError(
+                f"{self.ROLLOUT_SOURCE_COLUMN} is not non-decreasing, so worker outputs were "
+                "reordered and rows can no longer be matched to their prompts"
+            )
+
+        empty = num_sampled_prompts - len(np.unique(index))
+        print(
+            f"[verl] {num_sampled_prompts} rollouts -> {len(index)} training rows"
+            + (f" ({empty} produced none)" if empty else "")
+        )
+        return combined_gen_output, index
+
+    def _merge_generated_rows(self, batch: DataProto, gen_batch_output: DataProto, batch_row_index):
+        """Bring the generated rows back onto the batch that produced them.
+
+        ``batch_row_index`` comes from :meth:`_align_generated_rows`: ``None`` when each
+        rollout produced exactly one row, otherwise the source rollout of every generated
+        row.
+
+        Kept as one method rather than three lines at the call site because the expansion
+        and the union have to agree, and a test that checks only the index is computed
+        cannot tell whether it was applied -- deleting the application left every such
+        test green while the rows went back to being dropped.
+        """
+        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+        if batch_row_index is not None:
+            # Expand this batch's per-rollout columns the same way the generated rows were
+            # expanded, so union still lines up row for row.
+            batch = batch.select_idxs(batch_row_index)
+        if len(batch) != len(gen_batch_output):
+            raise ValueError(
+                f"batch has {len(batch)} rows and the rollout returned {len(gen_batch_output)}; "
+                "they must match or the union pairs rows with the wrong prompts"
+            )
+        batch = batch.union(gen_batch_output)
+        return self._pad_rows_to_divisor(batch) if batch_row_index is not None else batch
+
+    def _rows_divisor(self) -> int:
+        """Row counts the rest of the step requires the batch to be a multiple of."""
+        import math
+
+        divisor = self.actor_rollout_wg.world_size
+        for size in (
+            self.config.actor_rollout_ref.actor.ppo_mini_batch_size,
+            self.config.critic.ppo_mini_batch_size if self.use_critic else None,
+        ):
+            if size:
+                divisor = math.lcm(divisor, int(size))
+        return divisor
+
+    def _pad_rows_to_divisor(self, batch: DataProto) -> DataProto:
+        """Round the row count up to something the DP split and the mini-batches accept.
+
+        ★ Only needed once a rollout may produce a variable number of rows. Before that,
+        the batch was always `train_batch_size * rollout.n` and every divisor divided it by
+        construction; now it is however many turns the episodes happened to take.
+        `_balance_batch` asserts `len % world_size == 0` (seqlen_balancing.py) and the actor
+        update asserts `batch_size % ppo_mini_batch_size == 0` (tensordict_utils.py), so
+        without this a `no_concat` step dies on the first `AssertionError` with nothing
+        naming the cause.
+
+        Padding duplicates rows from the front, exactly as `pad_dataproto_to_divisor` does
+        for the filter path. The advantage estimators deduplicate identical
+        (episode, turn) rows before scoring, so the copies do not double-count in the
+        backward recursion.
+        """
+        from verl.protocol import pad_dataproto_to_divisor
+
+        divisor = self._rows_divisor()
+        if len(batch) % divisor == 0:
+            return batch
+        before = len(batch)
+        batch, pad_size = pad_dataproto_to_divisor(batch, divisor)
+        print(f"[verl] padded {before} -> {before + pad_size} rows for divisor {divisor}")
+        return batch
+
     def _fit_generate(self, batch: DataProto = None) -> DataProto:
         metrics = self.metrics
         timing_raw = self.timing_raw
@@ -440,7 +573,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             timing_raw.update(combined_gen_output.meta_info["timing"])
             combined_gen_output.meta_info.pop("timing", None)
 
-        gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
+        gen_batch_output, batch_row_index = self._align_generated_rows(combined_gen_output, num_sampled_prompts)
         if "__do_sample__" in gen_batch_output.non_tensor_batch:
             gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
@@ -462,8 +595,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             del gen_baseline_output
         del combined_gen_batch, combined_gen_output
         # repeat to align with repeated responses in rollout
-        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-        batch = batch.union(gen_batch_output)
+        batch = self._merge_generated_rows(batch, gen_batch_output, batch_row_index)
 
         if "response_mask" not in batch.batch.keys():
             batch.batch["response_mask"] = compute_response_mask(batch)

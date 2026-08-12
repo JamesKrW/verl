@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+import inspect
+
 import torch
 from tensordict import TensorDict
 
@@ -88,6 +90,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
+    # A policy loss whose unit of action is a turn rather than a row needs to know where
+    # the turns are, and `PolicyLossFn`'s signature has no such argument. The advantage
+    # estimator publishes `turn_id` -- it has already located the boundaries, and a second
+    # implementation inside the loss could disagree with the first while both look right.
+    # NOTE: `select` is a whitelist, so the key has to be requested explicitly here.
+    has_turn_id = "turn_id" in data.keys()
+    if has_turn_id:
+        fields.append("turn_id")
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
@@ -101,6 +111,12 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
+    extra_args = {}
+    # By signature, the same way the advantage side decides what to pass: every loss in
+    # the registry takes the seven fixed arguments and only a turn-level one takes this,
+    # so handing it to all of them would be a TypeError on every other loss.
+    if has_turn_id and "turn_id" in inspect.signature(policy_loss_fn).parameters:
+        extra_args["turn_id"] = data["turn_id"]
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
@@ -109,6 +125,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         loss_agg_mode=loss_agg_mode,
         config=config,
         rollout_is_weights=rollout_is_weights,
+        **extra_args,
     )
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
@@ -177,11 +194,22 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     else:
         metric_aggregation = AggregationType.MEAN
 
-    # select fields and convert to padded tensor
-    data = data.select("values", "returns", "response_mask").to_padded_tensor()
+    # select fields and convert to padded tensor.
+    # Turn-level / bi-level advantage estimators write `returns` at one anchor token per
+    # turn and leave the rest at a sentinel. `value_mask` marks the positions that carry
+    # supervision, so the critic is not trained on the sentinel. Optional -- absent,
+    # every response token is supervised, which is the default behaviour.
+    # NOTE: `select` is a whitelist, so the key has to be requested explicitly.
+    fields = ["values", "returns", "response_mask"]
+    has_value_mask = "value_mask" in data.keys()
+    if has_value_mask:
+        fields.append("value_mask")
+    data = data.select(*fields).to_padded_tensor()
     values = data["values"]
     returns = data["returns"]
     response_mask = data["response_mask"].to(bool)
+    if has_value_mask:
+        response_mask = response_mask & data["value_mask"].to(bool)
 
     vf_loss, vf_clipfrac = compute_value_loss(
         vpreds=vpreds,

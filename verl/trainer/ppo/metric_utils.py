@@ -487,8 +487,17 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         logger.warning("All samples are aborted, returning default reward metrics")
         reward_mean = reward_max = reward_min = float("nan")
 
+    # An estimator that supervises only some positions marks the rest with a sentinel
+    # return and says which are real in `value_mask`. The loss honours that; these
+    # metrics did not, so the sentinel was averaged in and critic/returns/mean read
+    # -87 where the supervised mean was 0.75, and vf_explained_var was meaningless.
+    # That is the one metric whose job is to reveal a broken critic.
+    returns_mask = response_mask
+    if "value_mask" in batch.batch:
+        returns_mask = response_mask & batch.batch["value_mask"].to(response_mask.dtype).bool()
+
     valid_adv = torch.masked_select(advantages, response_mask)
-    valid_returns = torch.masked_select(returns, response_mask)
+    valid_returns = torch.masked_select(returns, returns_mask)
 
     if valid_adv.numel() > 0:
         adv_mean = torch.mean(valid_adv).detach().item()
@@ -527,7 +536,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
 
     if use_critic:
         values = batch.batch["values"]
-        valid_values = torch.masked_select(values, response_mask)
+        # Compared against `valid_returns`, so masked the same way -- otherwise the two
+        # sides of the explained-variance ratio count different positions.
+        valid_values = torch.masked_select(values, returns_mask)
         if valid_returns.numel() > 0 and valid_values.numel() > 0:
             return_diff_var = torch.var(valid_returns - valid_values)
             return_var = torch.var(valid_returns)
