@@ -26,7 +26,7 @@ from transformers import (
 from verl.utils.device import get_device_name
 
 if get_device_name() == "cuda":
-    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+    from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 elif get_device_name() == "npu":
     from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 

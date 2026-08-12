@@ -37,7 +37,7 @@ from verl.utils.ulysses import (
 )
 
 if get_device_name() == "cuda":
-    from flash_attn.bert_padding import index_first_axis, rearrange, unpad_input
+    from verl.utils.attention_utils import index_first_axis, rearrange, unpad_input
 elif get_device_name() == "npu":
     from verl.utils.attention_utils import index_first_axis, rearrange, unpad_input
 
