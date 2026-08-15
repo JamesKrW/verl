@@ -286,6 +286,16 @@ class FSDPEngine(BaseEngine):
                 )
 
             use_liger = self.model_config.use_liger
+
+            # vLLM masks the padded LM-head tail at ``len(tokenizer)`` before sampling.
+            # Some checkpoints deliberately keep a wider output matrix (GLM-4.6V:
+            # 151552 rows for a 151365-token tokenizer). Training/ref forwards must use
+            # the same softmax support or every log-prob differs by the tail's partition
+            # mass even before an update. Keep the full parameter for checkpoint/weight
+            # sync; model-family forwards may read this bound when computing logits.
+            if self.model_config.tokenizer is not None:
+                module._verl_valid_vocab_size = len(self.model_config.tokenizer)
+
             # Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with verl's forward patching)
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance

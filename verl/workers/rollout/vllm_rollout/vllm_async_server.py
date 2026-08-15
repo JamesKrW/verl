@@ -136,6 +136,16 @@ class vLLMHttpServer:
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 
+        # vLLM V1 starts EngineCore with Python ``spawn``, so a class monkey patch in
+        # this Ray actor is not inherited.  Promote the launcher opt-in to the private
+        # sitecustomize trigger only here, immediately before vLLM creates that child.
+        # This keeps ordinary Ray/FSDP workers from importing vLLM during interpreter
+        # startup while ensuring the GLM engine child sees the GPT-J MRoPE compatibility
+        # patch.  See vllm-project/vllm#42765.
+        if os.getenv("VERL_ENABLE_VLLM_GPTJ_MROPE_PATCH", "0") == "1":
+            os.environ["VERL_PATCH_VLLM_GPTJ_MROPE"] = "1"
+            logger.info("enabled GPT-J MRoPE compatibility for spawned vLLM engine")
+
         if self.config.full_determinism:
             from verl.workers.engine.utils import enable_full_determinism
 

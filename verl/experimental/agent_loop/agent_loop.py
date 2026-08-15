@@ -71,6 +71,7 @@ from verl.workers.config import (
     RolloutConfig,
 )
 from verl.workers.rollout.llm_server import LLMServerClient
+from verl.workers.rollout.sampling import build_agent_loop_sampling_params
 from verl.workers.rollout.utils import dedup_multimodal_placeholder_tokens
 
 logger = logging.getLogger(__file__)
@@ -241,6 +242,34 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Multi-modal inputs for processors (e.g. pixel_values, image_grid_thw, video_grid_thw)."""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
+
+
+def _concat_response_logprobs(inputs: list[_InternalAgentLoopOutput]) -> torch.Tensor | None:
+    """Concatenate optional rollout logprobs without trusting the first row.
+
+    An immediate EOS produces no sampled response token and therefore no logprob tensor,
+    while sibling rollouts in the same batch can have ordinary tensors.  The old
+    first-row check then attempted ``torch.cat([tensor, ..., None])``.  A missing tensor
+    is safely representable as zeros only when its response mask is entirely zero; those
+    positions are ignored by every probability metric and loss.  Missing logprobs for an
+    actual sampled token remain a hard error rather than being silently fabricated.
+    """
+    values = [item.response_logprobs for item in inputs]
+    if not any(value is not None for value in values):
+        return None
+
+    normalized = []
+    for index, (item, value) in enumerate(zip(inputs, values, strict=True)):
+        if value is not None:
+            normalized.append(value)
+            continue
+        if torch.count_nonzero(item.response_mask).item():
+            raise ValueError(
+                f"rollout {index} has sampled response tokens but no response_logprobs; "
+                "the rollout backend must return a logprob for every mask-1 token"
+            )
+        normalized.append(torch.zeros_like(item.response_mask, dtype=torch.float32))
+    return torch.cat(normalized, dim=0)
 
 
 class DictConfigWrap:
@@ -652,24 +681,12 @@ class AgentLoopWorker:
         """
         config = self.rollout_config
         validate = batch.meta_info.get("validate", False)
-        sampling_params = dict(
-            temperature=config.temperature,
-            top_p=config.top_p,
-            top_k=config.top_k,
-            repetition_penalty=1.0,
-            logprobs=config.calculate_log_probs,
-        )
+        sampling_params = build_agent_loop_sampling_params(config, validate=validate)
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
             params["top_p"] = 1.0
             params["top_k"] = -1
             params["temperature"] = 0
-
-        # override sampling params for validation
-        if validate:
-            sampling_params["top_p"] = config.val_kwargs.top_p
-            sampling_params["top_k"] = config.val_kwargs.top_k
-            sampling_params["temperature"] = config.val_kwargs.temperature
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
@@ -1136,8 +1153,9 @@ class AgentLoopWorker:
         input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
         position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
         optional_outputs = {}
-        if inputs[0].response_logprobs is not None:
-            optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
+        response_logprobs = _concat_response_logprobs(inputs)
+        if response_logprobs is not None:
+            optional_outputs["rollout_log_probs"] = response_logprobs
         if inputs[0].routed_experts is not None:
             optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:

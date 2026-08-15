@@ -28,10 +28,39 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopWorker,
     DictConfigWrap,
     _InternalAgentLoopOutput,
+    _concat_response_logprobs,
 )
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from verl.workers.rollout.replica import TokenOutput
+
+
+def _logprob_row(mask, logprobs):
+    width = len(mask)
+    return _InternalAgentLoopOutput(
+        prompt_ids=torch.zeros((1, 1), dtype=torch.long),
+        response_ids=torch.zeros((1, width), dtype=torch.long),
+        input_ids=torch.zeros((1, width + 1), dtype=torch.long),
+        position_ids=torch.zeros((1, width + 1), dtype=torch.long),
+        response_mask=torch.tensor([mask]),
+        attention_mask=torch.ones((1, width + 1), dtype=torch.long),
+        response_logprobs=None if logprobs is None else torch.tensor([logprobs]),
+        metrics=AgentLoopMetrics(),
+    )
+
+
+def test_mixed_logprobs_fill_only_empty_response_rows():
+    actual = _concat_response_logprobs(
+        [_logprob_row([1, 1], [-0.2, -0.3]), _logprob_row([0, 0], None)]
+    )
+    torch.testing.assert_close(actual, torch.tensor([[-0.2, -0.3], [0.0, 0.0]]))
+
+
+def test_missing_logprobs_for_sampled_tokens_is_rejected():
+    with pytest.raises(ValueError, match="sampled response tokens"):
+        _concat_response_logprobs(
+            [_logprob_row([1, 0], [-0.2, 0.0]), _logprob_row([1, 0], None)]
+        )
 
 
 class _FakeServerManager:

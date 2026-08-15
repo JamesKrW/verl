@@ -429,6 +429,16 @@ class Glm4vCausalLMOutputForPPO(Glm4vCausalLMOutputWithPast):
     entropy: Optional[torch.FloatTensor] = None
 
 
+def _valid_vocab_size(model: "Glm4vForConditionalGeneration") -> int:
+    """The sampler-visible vocabulary, excluding padded LM-head rows."""
+    return min(int(getattr(model, "_verl_valid_vocab_size", model.lm_head.weight.shape[0])),
+               int(model.lm_head.weight.shape[0]))
+
+
+def _valid_vocab_weights(model: "Glm4vForConditionalGeneration") -> torch.Tensor:
+    return model.lm_head.weight[: _valid_vocab_size(model)]
+
+
 def glm4v_base_forward(
     self: "Glm4vForConditionalGeneration",
     input_ids: torch.LongTensor,
@@ -481,7 +491,9 @@ def forward_with_normal_backend(
 ) -> "Glm4vCausalLMOutputWithPast":
     outputs = glm4v_forward(self, input_ids, **kwargs)
     hidden_states = outputs[0]
-    logits = self.lm_head(hidden_states)
+    # vLLM masks rows beyond len(tokenizer). GLM pads its LM head wider than the
+    # tokenizer, and normalising over those extra rows shifts every actor/ref log-prob.
+    logits = self.lm_head(hidden_states)[..., : _valid_vocab_size(self)]
 
     return Glm4vCausalLMOutputWithPast(
         logits=logits,
@@ -516,7 +528,7 @@ def forward_with_torch_backend(
     fused_linear_for_ppo = FusedLinearForPPO()
     log_probs, entropy = fused_linear_for_ppo.forward(
         hidden_states=hidden_states,
-        vocab_weights=self.lm_head.weight,
+        vocab_weights=_valid_vocab_weights(self),
         input_ids=rolled_labels,
         temperature=temperature,
     )
@@ -553,7 +565,7 @@ def forward_with_triton_backend(
 
     log_probs, entropy = linear_cross_entropy(
         hidden_states,
-        self.lm_head.weight,
+        _valid_vocab_weights(self),
         rolled_labels,
         temperature,
         "none",

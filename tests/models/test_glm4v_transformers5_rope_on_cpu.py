@@ -19,6 +19,7 @@ import torch
 from transformers.models.glm4v.modeling_glm4v import apply_rotary_pos_emb
 
 from verl.models.transformers.glm4v import glm4v_attn_forward
+from verl.models.transformers.glm4v import _valid_vocab_weights
 
 
 class _Attention(torch.nn.Module):
@@ -66,3 +67,15 @@ def test_attention_uses_transformers5_precomputed_rope():
     torch.testing.assert_close(captured["query"], expected_query.transpose(1, 2))
     torch.testing.assert_close(captured["key"], expected_key.transpose(1, 2))
     assert output.shape == (1, 3, 8)
+
+
+def test_training_softmax_excludes_the_padded_lm_head_tail():
+    """vLLM samples only ids the tokenizer can decode; FSDP must normalise likewise."""
+    model = torch.nn.Module()
+    model.lm_head = torch.nn.Linear(4, 8, bias=False)
+    model._verl_valid_vocab_size = 5
+
+    weights = _valid_vocab_weights(model)
+
+    assert weights.shape == (5, 4)
+    assert weights.data_ptr() == model.lm_head.weight.data_ptr()

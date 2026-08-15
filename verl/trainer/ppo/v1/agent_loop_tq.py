@@ -33,6 +33,7 @@ from verl.experimental.agent_loop import (
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+from verl.workers.rollout.sampling import build_agent_loop_sampling_params
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -61,19 +62,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
         config = self.config.actor_rollout_ref.rollout
-        sampling_params = dict(
-            temperature=config.temperature,
-            top_p=config.top_p,
-            top_k=config.top_k,
-            repetition_penalty=1.0,
-            logprobs=config.calculate_log_probs,
-        )
-
-        # override sampling params for validation
-        if validate:
-            sampling_params["top_p"] = config.val_kwargs.top_p
-            sampling_params["top_k"] = config.val_kwargs.top_k
-            sampling_params["temperature"] = config.val_kwargs.temperature
+        sampling_params = build_agent_loop_sampling_params(config, validate=validate)
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch:

@@ -272,6 +272,24 @@ def patch_forward_with_backends(
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
+    elif getattr(model.config, "vision_config", None) is not None:
+        # ``dense_common`` is a text-only forward: it calls ``self.model`` with token
+        # tensors and deliberately has no multimodal arguments. Applying it to an
+        # otherwise unsupported VLM silently drops ``pixel_values`` (and family-specific
+        # image metadata) from actor/ref forwards while the rollout engine still sees the
+        # images. The run stays alive but optimises probabilities from a different model.
+        #
+        # The engine also chooses its output contract from ``use_fused_kernels`` and will
+        # read ``output.log_probs``/``output.entropy`` when it is true, so silently keeping
+        # the native logits-returning forward is not a valid fallback. Refuse the config
+        # and tell the launcher to disable the whole fused path until this family has an
+        # adapter. InternVL is the first model that exposed this, but the guard is
+        # capability-based so the next unknown VLM fails safe too.
+        raise NotImplementedError(
+            f"fused kernels do not support multimodal model type "
+            f"{model.config.model_type!r} ({model.__class__.__name__}); set "
+            "actor_rollout_ref.model.use_fused_kernels=False"
+        )
     else:
         from verl.models.transformers.dense_common import forward_with_torch_backend, forward_with_triton_backend
 
