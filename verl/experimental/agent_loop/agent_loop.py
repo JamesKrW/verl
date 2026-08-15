@@ -71,6 +71,7 @@ from verl.workers.config import (
     RolloutConfig,
 )
 from verl.workers.rollout.llm_server import LLMServerClient
+from verl.workers.rollout.utils import dedup_multimodal_placeholder_tokens
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -937,7 +938,24 @@ class AgentLoopWorker:
         images = multi_modal_data.get("images")
         videos = multi_modal_data.get("videos")
         audios = multi_modal_data.get("audios")
-        current_text = self.tokenizer.decode(input_ids.squeeze(0), skip_special_tokens=True)
+        token_ids = input_ids.squeeze(0).tolist()
+        # vLLM reports the prompt it actually ran, with multimodal placeholders expanded
+        # to feature length. HF processors expect one marker per image/video and expand
+        # it themselves, so feeding the engine form back makes them count one frame per
+        # feature token (GLM-4.6V exhausts its image iterator with StopIteration). Return
+        # every contiguous placeholder block to one marker before rebuilding tensors.
+        token_ids = dedup_multimodal_placeholder_tokens(token_ids, self.processor)
+        if getattr(self.processor, "image_token", None) == "<IMG_CONTEXT>":
+            # InternVL's processor finds images by scanning text for one
+            # ``<IMG_CONTEXT>`` marker per frame. The sequence returned by vLLM already
+            # contains the fully expanded blocks, and ``skip_special_tokens=True`` drops
+            # every marker, so rebuilding pixel inputs sees zero placeholders for N
+            # images. Normalize each block back to one marker and preserve special tokens
+            # in the decode; the processor then expands it exactly once alongside the
+            # images, matching the rollout path.
+            current_text = self.tokenizer.decode(token_ids, skip_special_tokens=False)
+        else:
+            current_text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
 
         multi_modal_inputs = build_multimodal_processor_inputs(
             self.processor,

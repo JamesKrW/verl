@@ -570,3 +570,12 @@ def test_flops_counter(config_type: str):
             assert math.isclose(counted_flops, expected_flops), (
                 f"Expect flops for {test_config['config']} is {expected_flops}, but get {counted_flops}"
             )
+
+
+def test_glm4v_reads_decoder_dimensions_from_text_config():
+    text_config = CONFIG["qwen2"]["config"].copy()
+    config = Config({"model_type": "glm4v", "text_config": text_config})
+
+    counted_flops, _ = FlopsCounter(config).estimate_flops([128, 64], 1)
+
+    assert counted_flops > 0

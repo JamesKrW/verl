@@ -106,8 +106,9 @@ def dedup_multimodal_placeholder_tokens(prompt_ids: list[int], processor):
     the model, with nothing naming the prompt.
 
     Keyed on the placeholder ids the processor declares rather than on its class name,
-    so it holds wherever one image expands to one *contiguous* run -- Qwen2-VL,
-    Qwen2.5-VL and InternVL among them.
+    so it holds wherever one image expands to one *contiguous* run -- Qwen2-VL and
+    Qwen2.5-VL among them. InternVL needs the stronger normalization below because its
+    expansion includes wrapper tokens too.
 
     It does not hold everywhere, and the failure is silent either way. Pixtral separates
     rows with ``[IMG_BREAK]``, so the run is interrupted and one image is left with one
@@ -118,6 +119,37 @@ def dedup_multimodal_placeholder_tokens(prompt_ids: list[int], processor):
     """
     if processor is None:
         return prompt_ids
+
+    # InternVL's HF processor expands one image to a repeated ``<IMG_CONTEXT>`` block
+    # inside ``<img>`` wrappers. vLLM recognizes one context token as the per-image
+    # marker and adds the wrappers itself. Collapsing only the context run leaves the
+    # old wrappers behind, so each continuation reprocesses every old image and grows
+    # one more wrapper pair. Collapse the *entire* block to one context token instead;
+    # processing that marker is idempotent across turns.
+    image_token = getattr(processor, "image_token", None)
+    tokenizer = getattr(processor, "tokenizer", None)
+    if image_token == "<IMG_CONTEXT>" and tokenizer is not None:
+        context_id = tokenizer.convert_tokens_to_ids(image_token)
+        start_id = tokenizer.convert_tokens_to_ids("<img>")
+        end_id = tokenizer.convert_tokens_to_ids("</img>")
+        if all(isinstance(token_id, int) for token_id in (context_id, start_id, end_id)):
+            normalized = []
+            cursor = 0
+            while cursor < len(prompt_ids):
+                block_start = cursor
+                while cursor < len(prompt_ids) and prompt_ids[cursor] == start_id:
+                    cursor += 1
+                context_start = cursor
+                while cursor < len(prompt_ids) and prompt_ids[cursor] == context_id:
+                    cursor += 1
+                if cursor > context_start:
+                    while cursor < len(prompt_ids) and prompt_ids[cursor] == end_id:
+                        cursor += 1
+                    normalized.append(context_id)
+                    continue
+                normalized.append(prompt_ids[block_start])
+                cursor = block_start + 1
+            return normalized
 
     placeholder_ids = [
         getattr(processor, attr, None) for attr in ("image_token_id", "video_token_id", "audio_token_id")

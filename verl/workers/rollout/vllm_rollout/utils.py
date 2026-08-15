@@ -116,9 +116,20 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
         **kwargs,
     ) -> torch.Tensor:
         logits = original_compute_logits(*args, **kwargs)
-        logits[..., vocab_size:] = float("-inf")
+        # A tokenizer can legitimately declare special tokens that the language
+        # model has no output row for. InternVL3 is one such family: its tokenizer
+        # includes a trailing ``<video>`` token while ``text_config.vocab_size``
+        # (and therefore the logits width) stops one id earlier. The OOV-tail slice
+        # is already harmless when ``vocab_size`` is wider than the logits, but
+        # indexing the same trailing id through ``banned_token_ids`` triggers a CUDA
+        # device-side assert on the first rollout. Mask only ids the model can emit;
+        # absent rows are already impossible to sample.
+        logits_width = logits.shape[-1]
+        logits[..., min(vocab_size, logits_width) :] = float("-inf")
         if banned_token_ids:
-            logits[..., banned_token_ids] = float("-inf")
+            valid_banned_token_ids = [token_id for token_id in banned_token_ids if 0 <= token_id < logits_width]
+            if valid_banned_token_ids:
+                logits[..., valid_banned_token_ids] = float("-inf")
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)

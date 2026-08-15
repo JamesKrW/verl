@@ -310,7 +310,7 @@ def glm4v_attn_forward(
     position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
     **kwargs,
 ) -> tuple[torch.Tensor, None, None]:
-    from transformers.models.glm4v.modeling_glm4v import apply_multimodal_rotary_pos_emb, repeat_kv
+    from transformers.models.glm4v.modeling_glm4v import apply_rotary_pos_emb, repeat_kv
 
     bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
     query_states = self.q_proj(hidden_states)  # (batch_size, seq_length / sp_size, num_heads * head_size)
@@ -321,18 +321,13 @@ def glm4v_attn_forward(
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-    # Because the input can be padded, the absolute sequence length depends on the max position id.
+    # transformers 5.x folds GLM's temporal/height/width sections into ``cos``
+    # and ``sin`` in Glm4vTextRotaryEmbedding. The old
+    # apply_multimodal_rotary_pos_emb helper was removed; applying the already
+    # mixed embeddings with the model's current helper is both simpler and the
+    # exact path used by upstream Glm4vTextAttention.forward.
     cos, sin = position_embeddings
-    if getattr(self, "rope_scaling", None) is not None:
-        # for transformers < 5.0.0
-        mrope_section = self.rope_scaling.get("mrope_section", None)
-    else:
-        # for transformers >= 5.0.0, only rope_parameters present in the config
-        assert getattr(self, "rope_parameter", None) is not None, (
-            "Either rope_scaling or rope_parameter should be defined in the config for GLM4V."
-        )
-        mrope_section = self.rope_parameter.get("mrope_section", None)
-    query_states, key_states = apply_multimodal_rotary_pos_emb(query_states, key_states, cos, sin, mrope_section)
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
     dropout_rate = 0.0 if not self.training else self.attention_dropout

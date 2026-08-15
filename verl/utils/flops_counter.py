@@ -90,6 +90,10 @@ def get_device_flops(unit="T", device_name=None):
 
 
 def _estimate_qwen2_flops(config, tokens_sum, batch_seqlens, delta_time):
+    # Multimodal wrappers such as GLM-4V keep the language dimensions under
+    # ``text_config``. The FLOPs estimator is an observability helper and should read the
+    # same decoder fields regardless of whether the checkpoint wraps them in a VLM.
+    config = getattr(config, "text_config", config)
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
     num_hidden_layers = config.num_hidden_layers

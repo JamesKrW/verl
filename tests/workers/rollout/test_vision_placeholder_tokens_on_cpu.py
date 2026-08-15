@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import torch
 
-from verl.workers.rollout.utils import get_vision_placeholder_token_ids
+from verl.workers.rollout.utils import dedup_multimodal_placeholder_tokens, get_vision_placeholder_token_ids
 from verl.workers.rollout.vllm_rollout.utils import monkey_patch_compute_logits
 
 TOKENS = {151655: "<|image_pad|>", 151656: "<|video_pad|>"}
@@ -102,3 +102,43 @@ class TestMonkeyPatchComputeLogits:
         logits = model.compute_logits()
 
         assert torch.equal(logits[:, :VOCAB_SIZE], UNMASKED)
+
+    def test_tokenizer_only_placeholder_outside_logits_is_ignored(self):
+        """InternVL3 declares one trailing video token that has no output logit.
+
+        It is already impossible to sample, so trying to mask it must not index one
+        past the logits width. Valid placeholders are still masked in the same call.
+        """
+        model = FakeModel()
+
+        monkey_patch_compute_logits(
+            model,
+            vocab_size=PADDED_WIDTH + 1,
+            banned_token_ids=[2, PADDED_WIDTH],
+        )
+        logits = model.compute_logits()
+
+        assert (logits[:, 2] == float("-inf")).all()
+        assert torch.equal(logits[:, [0, 1, 3, 4, 5, 6, 7]], torch.tensor([[0, 1, 3, 4, 5, 6, 7]] * 2))
+
+
+class _InternVLTokenizer:
+    _ids = {"<img>": 10, "</img>": 11, "<IMG_CONTEXT>": 12}
+
+    def convert_tokens_to_ids(self, token):
+        return self._ids.get(token)
+
+
+class _InternVLProcessor:
+    image_token = "<IMG_CONTEXT>"
+    image_token_id = 12
+    video_token_id = None
+    audio_token_id = None
+    tokenizer = _InternVLTokenizer()
+
+
+def test_internvl_expanded_image_block_is_restored_to_raw_marker():
+    processor = _InternVLProcessor()
+    prompt = [1, 10, 10, 12, 12, 12, 11, 11, 2, 10, 12, 11, 3]
+
+    assert dedup_multimodal_placeholder_tokens(prompt, processor) == [1, 12, 2, 12, 3]
