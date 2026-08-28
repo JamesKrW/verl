@@ -307,6 +307,12 @@ def qwen2_vl_attn_forward(
 
     # Because the input can be padded, the absolute sequence length depends on the max position id.
     cos, sin = position_embeddings
+    if cos.shape[-2] != q_len:
+        raise ValueError(
+            "Qwen rotary embeddings do not match the token sequence: "
+            f"query={tuple(query_states.shape)}, cos={tuple(cos.shape)}, "
+            f"position_ids={None if position_ids is None else tuple(position_ids.shape)}"
+        )
     if getattr(self, "rope_scaling", None) is not None:
         # for transformers < 5.0.0
         mrope_section = self.rope_scaling.get("mrope_section", None)
@@ -433,6 +439,23 @@ def process_position_ids(position_ids: torch.Tensor) -> torch.Tensor:
     return position_ids
 
 
+def normalize_position_ids_layout(position_ids: Optional[torch.Tensor], sequence_length: int) -> Optional[torch.Tensor]:
+    """Keep packed mRoPE ids in ``(rope, batch, sequence)`` order.
+
+    TensorDict/FSDP combinations can materialize the jagged value tensor in
+    ``(batch, sequence, rope)`` order.  Transformers then interprets the four RoPE
+    channels as a four-token sequence and fails in attention with a misleading
+    sequence-length mismatch.
+    """
+    if position_ids is None or position_ids.ndim != 3:
+        return position_ids
+    if position_ids.shape[0] in (3, 4) and position_ids.shape[-1] == sequence_length:
+        return position_ids
+    if position_ids.shape[-1] in (3, 4) and position_ids.shape[1] == sequence_length:
+        return position_ids.permute(2, 0, 1).contiguous()
+    return position_ids
+
+
 @dataclass
 class Qwen2VLCausalLMOutputForPPO(Qwen2VLCausalLMOutputWithPast):
     log_probs: Optional[torch.FloatTensor] = None
@@ -467,6 +490,12 @@ def qwen2_vl_forward(
     video_grid_thw: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
+    position_ids = normalize_position_ids_layout(position_ids, input_ids.shape[-1])
+    if position_ids is not None and position_ids.shape[-1] != input_ids.shape[-1]:
+        raise ValueError(
+            "Qwen position ids do not match the packed token sequence: "
+            f"input_ids={tuple(input_ids.shape)}, position_ids={tuple(position_ids.shape)}"
+        )
     if is_transformers_version_in_range(min_version="4.52.0"):
         return self.model(
             input_ids=input_ids,
