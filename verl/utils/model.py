@@ -244,7 +244,27 @@ def compute_position_id_with_mask(mask):
 def convert_weight_keys(state_dict: dict[str, torch.Tensor], model: PreTrainedModel):
     # convert state dict keys: https://github.com/huggingface/transformers/pull/38385
     if not hasattr(model, "_checkpoint_conversion_mapping"):
-        return state_dict
+        # transformers >= 5 dropped `_checkpoint_conversion_mapping` and moved the same
+        # runtime -> checkpoint renaming into the weight-conversion machinery, which
+        # `save_pretrained` reaches through `revert_weight_conversion`. Returning the
+        # state dict untouched here is silent and wrong for any model that needs the
+        # rename: for Qwen2.5-VL the runtime tree is `model.visual.*` /
+        # `model.language_model.*` while the checkpoint namespace -- the one inference
+        # engines load and the one weight sync must speak -- is `visual.*` / `model.*`.
+        # The mismatch does not surface here; it surfaces inside the engine as a
+        # KeyError on a parameter that does exist, under a different prefix.
+        #
+        # Guarded on both the import and the type: this function used to be incapable
+        # of raising, and callers sit on the weight-sync path, so it must not start
+        # now. `revert_weight_conversion` walks the module tree and needs a real
+        # PreTrainedModel; anything else keeps the old pass-through.
+        if not isinstance(model, PreTrainedModel):
+            return state_dict
+        try:
+            from transformers.core_model_loading import revert_weight_conversion
+        except ImportError:
+            return state_dict
+        return revert_weight_conversion(model, state_dict)
 
     reverse_key_mapping = {v: k for k, v in model._checkpoint_conversion_mapping.items()}
     original_weights = {}
