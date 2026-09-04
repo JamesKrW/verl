@@ -129,6 +129,24 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             replicas=self.llm_server_manager.get_replicas(),
         )
 
+        # sleep all replicas to load checkpoint
+        #
+        # Same call that ends RayPPOTrainer.init_workers, and this override
+        # dropped it. `fit` then runs `_load_checkpoint` and, straight after,
+        # `checkpoint_manager.update_weights`, whose naive path issues
+        # `rollout.resume(tags=["weights"])` unconditionally. With
+        # `free_cache_engine` on and nothing ever released, SGLang's resume --
+        # `self.offload_tags.remove(tag)` -- raises KeyError: 'weights' and takes
+        # the scheduler down. Every rank then reports only "Failed to complete
+        # async request to resume_memory_occupation after 3 attempts", which
+        # names neither the tag nor the trainer.
+        #
+        # Later steps are already paired: `fit_step` sleeps the replicas right
+        # after generation. Only the first sync was unpaired, on fresh runs as
+        # well as on restore. Configurations with `free_cache_engine=False` never
+        # saw it because they skip the resume too.
+        self.checkpoint_manager.sleep_replicas()
+
     def _init_resource_pools(self):
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
