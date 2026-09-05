@@ -846,12 +846,31 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             if esi_close_to_expiration:
                 print("Force saving checkpoint: ESI instance expiration approaching.")
             with marked_timer("save_checkpoint", timing_raw, color="green"):
-                # sleep replicas to avoid OOM during checkpoint saving
-                # self.checkpoint_manager.sleep_replicas()
+                # Sleep the replicas to avoid OOM during checkpoint saving. This was
+                # commented out; it is needed, and the OOM it prevents is not marginal.
+                #
+                # `_fit_update_weights` resumes the engine earlier in the step and
+                # `_fit_validate` then generates with it, so nothing has slept it by the
+                # time we get here. On a colocated 8-GPU node the engine is still holding
+                # its whole gpu_memory_utilization reservation while the save gathers
+                # sharded parameters:
+                #
+                #   torch.OutOfMemoryError: Tried to allocate 260.00 MiB. GPU 0 has a
+                #   total capacity of 79.18 GiB of which 168.25 MiB is free.
+                #   ... this process has 10.36 GiB ... Process <engine> has 50.01 GiB
+                #
+                # The trainer is not the consumer there -- the sleeping engine is 50 GiB
+                # of the 79. It is also not deterministic: the same run saved fine at
+                # steps 20 and 40 and died at 60, as the per-rank CUDA contexts grew.
+                #
+                # Waking has to go through `update_weights`: `wake_up_replicas` raises
+                # for RolloutMode.HYBRID ("in hybrid mode, rollout is wake up in
+                # update_weights"), and the next step opens with generation, which needs
+                # the engine up. The extra sync costs one weight transfer per save_freq
+                # steps.
+                self.checkpoint_manager.sleep_replicas()
                 self._save_checkpoint()
-                # wake replicas to avoid OOM during checkpoint saving
-                # TODO: Check separation is needed.
-                # self.checkpoint_manager.update_weights()
+                self.checkpoint_manager.update_weights(self.global_steps)
 
     def _fit_stop_profile(self, should_profiler=None):
         timing_raw = self.timing_raw

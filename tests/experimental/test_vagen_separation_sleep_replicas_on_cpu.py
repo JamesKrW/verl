@@ -54,6 +54,25 @@ def test_every_init_workers_sleeps_the_replicas():
     )
 
 
+def test_save_checkpoint_sleeps_the_replicas_around_the_save():
+    """The engine must not hold its reservation while the save gathers parameters.
+
+    _fit_update_weights resumes it earlier in the step and _fit_validate generates
+    with it, so nothing has slept it by then. On a colocated node it is tens of GiB
+    of the card, and the save OOMs non-deterministically -- fine at one step, dead
+    at the next as the per-rank CUDA contexts grow.
+    """
+    source = inspect.getsource(SeparateRayPPOTrainer._fit_save_checkpoint)
+    for call in ("sleep_replicas()", "_save_checkpoint()", "update_weights("):
+        assert call in source, f"{call} missing from _fit_save_checkpoint"
+    assert source.index("sleep_replicas()") < source.index("self._save_checkpoint()"), (
+        "the replicas must be asleep before the save, not after"
+    )
+    assert source.index("self._save_checkpoint()") < source.index("update_weights("), (
+        "the engine must be woken after the save; the next step opens with generation"
+    )
+
+
 def test_the_sleep_is_the_last_thing_init_workers_does():
     """It has to follow the CheckpointEngineManager it is called on."""
     for trainer_class in TRAINERS:
