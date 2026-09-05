@@ -70,10 +70,11 @@ def test_non_pretrained_model_without_a_mapping_passes_through():
 
 
 def test_missing_mapping_does_not_silently_pass_through_a_vl_model():
-    """transformers >= 5 dropped the attribute; the rename still has to happen.
+    """transformers >= 5 stopped filling the mapping; the rename still has to happen.
 
-    Skipped where transformers is old enough to still carry the attribute, since
-    then there is no fallback path to exercise.
+    Skipped only where the mapping is actually populated, which is the case that
+    needs no fallback. 5.8.1 keeps the attribute and sets it to `{}`, so guarding
+    on the attribute alone reverses an empty mapping and silently changes nothing.
     """
     revert = pytest.importorskip(
         "transformers.core_model_loading", reason="transformers < 5 has no weight-conversion module"
@@ -87,8 +88,8 @@ def test_missing_mapping_does_not_silently_pass_through_a_vl_model():
     config = transformers.AutoConfig.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
     with init_empty_weights():
         model = transformers.AutoModelForImageTextToText.from_config(config)
-    if hasattr(model, "_checkpoint_conversion_mapping"):
-        pytest.skip("this transformers still declares the mapping; the fallback is unused")
+    if getattr(model, "_checkpoint_conversion_mapping", None):
+        pytest.skip("this transformers still populates the mapping; the fallback is unused")
 
     converted = convert_weight_keys(model.state_dict(), model)
     prefixes = {key.split(".")[0] for key in converted}

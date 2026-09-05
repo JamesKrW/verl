@@ -243,7 +243,15 @@ def compute_position_id_with_mask(mask):
 
 def convert_weight_keys(state_dict: dict[str, torch.Tensor], model: PreTrainedModel):
     # convert state dict keys: https://github.com/huggingface/transformers/pull/38385
-    if not hasattr(model, "_checkpoint_conversion_mapping"):
+    #
+    # Empty counts as absent. transformers 5.8.1 still declares
+    # `_checkpoint_conversion_mapping` on Qwen2.5-VL but leaves it `{}`, so testing
+    # only for the attribute takes the branch below and reverses an empty mapping --
+    # a no-op that hands the engine runtime names. That surfaces far away, inside
+    # SGLang, as
+    #   KeyError: 'model.visual.blocks.0.mlp.gate_up_proj.weight'
+    # on a parameter that does exist, under `visual.` rather than `model.visual.`.
+    if not getattr(model, "_checkpoint_conversion_mapping", None):
         # transformers >= 5 dropped `_checkpoint_conversion_mapping` and moved the same
         # runtime -> checkpoint renaming into the weight-conversion machinery, which
         # `save_pretrained` reaches through `revert_weight_conversion`. Returning the
