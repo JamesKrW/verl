@@ -248,6 +248,11 @@ class SGLangHttpServer:
         if self._disaggregation_role != "null":
             self._prepend_cu12_lib_to_ld_library_path()
 
+        if self.model_config.hf_config.model_type in {"glm4v", "glm4v_moe"}:
+            from verl.utils.sglang.glm4v_mrope_patch import apply_glm4v_mrope_mask_compat_patch
+
+            apply_glm4v_mrope_mask_compat_patch()
+
         if self.nnodes > 1:
             if self.node_rank != 0:
                 assert master_address and master_port, "non-master node should provide master address and port"
@@ -533,6 +538,7 @@ class SGLangHttpServer:
         bootstrap_host: Optional[str] = None,
         bootstrap_port: Optional[int] = None,
         bootstrap_room: Optional[int] = None,
+        require_reasoning: bool = False,
     ) -> TokenOutput:
         # PD top-level dispatch: prefill mints a bootstrap_room and fans out
         # paired local-prefill + remote-decode calls; decode returns the tokens
@@ -550,6 +556,7 @@ class SGLangHttpServer:
                 bootstrap_host=self._pd_bootstrap_host,
                 bootstrap_port=self._disaggregation_bootstrap_port,
                 bootstrap_room=room,
+                require_reasoning=require_reasoning,
             )
             decode_coro = decode_peer.generate.remote(
                 prompt_ids,
@@ -560,6 +567,7 @@ class SGLangHttpServer:
                 bootstrap_host=self._pd_bootstrap_host,
                 bootstrap_port=self._disaggregation_bootstrap_port,
                 bootstrap_room=room,
+                require_reasoning=require_reasoning,
             )
             _, decode_output = await asyncio.gather(prefill_coro, decode_coro)
             return decode_output
@@ -607,6 +615,7 @@ class SGLangHttpServer:
             "sampling_params": sampling_params,
             "return_logprob": return_logprob,
             "image_data": image_data,
+            "require_reasoning": require_reasoning,
             # TODO: support video input for sglang
             # video_data=video_data,
         }
