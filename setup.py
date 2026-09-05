@@ -56,8 +56,8 @@ VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.18.0"]
 TRTLLM_REQUIRES = ["tensorrt-llm>=1.2.0rc6"]
 SGLANG_REQUIRES = [
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
-    "sglang[srt,openai]==0.5.8",
-    "torch==2.9.1",
+    "sglang==0.5.13",
+    "torch==2.11.0",
 ]
 TRL_REQUIRES = ["trl<=0.9.6"]
 # Keep the legacy mbridge dependency available during its deprecation window.

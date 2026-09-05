@@ -248,10 +248,15 @@ class SGLangHttpServer:
         if self._disaggregation_role != "null":
             self._prepend_cu12_lib_to_ld_library_path()
 
-        if self.model_config.hf_config.model_type in {"glm4v", "glm4v_moe"}:
+        model_type = self.model_config.hf_config.model_type
+        if model_type in {"glm4v", "glm4v_moe"}:
             from verl.utils.sglang.glm4v_mrope_patch import apply_glm4v_mrope_mask_compat_patch
 
             apply_glm4v_mrope_mask_compat_patch()
+        elif model_type == "internvl":
+            from verl.utils.sglang.internvl_processor_patch import apply_internvl35_processor_compat_patch
+
+            apply_internvl35_processor_compat_patch()
 
         if self.nnodes > 1:
             if self.node_rank != 0:
