@@ -58,3 +58,24 @@ def test_new_tensordict_does_not_rewrite_the_jagged_position_axis():
     position_ids = chunk_tensordict(data, 1)[0]["position_ids"].values()
 
     assert position_ids.shape == (4, valid)
+
+
+def test_tensordict_010_repairs_transfer_queue_single_sample_position_ids():
+    if parse_version(tensordict.__version__) != parse_version("0.10.0"):
+        return
+
+    sequence_length = 17
+    # TransferQueue reconstructs fields from per-sample values. With one sample,
+    # torch cannot infer that sequence (rather than the four RoPE channels) is
+    # the variable axis and initially creates [batch, jagged_rope, sequence].
+    position_ids = torch.nested.as_nested_tensor(
+        [torch.arange(4 * sequence_length).reshape(4, sequence_length)],
+        layout=torch.jagged,
+    )
+    data = TensorDict({"position_ids": position_ids}, batch_size=1)
+
+    maybe_fix_3d_position_ids(data)
+    micro_batch = chunk_tensordict(data, 1)[0]
+
+    assert micro_batch["position_ids"].offsets().diff().tolist() == [sequence_length]
+    assert micro_batch["position_ids"].values().shape == (4, sequence_length)

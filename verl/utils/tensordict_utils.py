@@ -919,7 +919,22 @@ def maybe_fix_3d_position_ids(data: TensorDict):
         and data["position_ids"].dim() == 3
         and data["position_ids"].is_nested
     ):
-        data["position_ids"]._ragged_idx = 2
+        position_ids = data["position_ids"]
+        # TransferQueue rebuilds a one-sample (or equal-length) list of
+        # ``(rope, sequence)`` tensors with the first non-batch dimension marked
+        # ragged.  Merely changing ``_ragged_idx`` then makes TensorDict slicing
+        # interpret the four RoPE channels as a four-token sequence.  Rebuild the
+        # nested tensor so its offsets describe sequence lengths before marking
+        # the sequence axis ragged.
+        ragged_lengths = position_ids.offsets().diff()
+        if getattr(position_ids, "_ragged_idx", None) != 2 and bool(
+            torch.all((ragged_lengths == 3) | (ragged_lengths == 4))
+        ):
+            data["position_ids"] = nested_tensor_from_tensor_list(
+                list(position_ids.unbind(dim=0)), ragged_idx=2
+            )
+        else:
+            position_ids._ragged_idx = 2
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
