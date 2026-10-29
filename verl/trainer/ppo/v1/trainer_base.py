@@ -1710,6 +1710,14 @@ class PPOTrainer(ABC):
 
         return batch
 
+    def _metric_extra_fields(self) -> list[str]:
+        """Additional TransferQueue fields to fetch into the metric batch.
+
+        For a subclass whose advantage step writes a field that compute_data_metrics
+        reads when present, such as ``value_mask``.
+        """
+        return []
+
     def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
         # 1. collect necessary fields from TransferQueue for computing metrics
         non_padding_mask = np.array([not tag.get("is_padding", False) for tag in batch.tags], dtype=bool)
@@ -1723,6 +1731,7 @@ class PPOTrainer(ABC):
             "rm_scores",
             "token_level_rewards",
             "num_turns",
+            *self._metric_extra_fields(),
         ]
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
